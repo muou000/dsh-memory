@@ -1,0 +1,21 @@
+{
+  "format": "dsh-memory-keyless-evaluation",
+  "version": 1,
+  "startedAt": "2026-08-29T11:46:00.543Z",
+  "finishedAt": "2026-08-29T11:46:00.643Z",
+  "node": "v26.8.1",
+  "metrics": {
+    "cases": 6,
+    "recallAt6": 1,
+    "precisionAt6": 0.8055555555555555,
+    "mrr": 0.9166666666666666,
+    "crossWorkspaceHits": 0
+  },
+  "thresholds": {
+    "recallAt6": 0.85,
+    "precisionAt6": 0.7,
+    "mrr": 0.8,
+    "crossWorkspaceHits": 0
+  },
+  "pass": true
+}

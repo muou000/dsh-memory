@@ -1,0 +1,13 @@
+{
+  "format": "dsh-memory-benchmark",
+  "version": 1,
+  "records": 10000,
+  "node": "v26.8.1",
+  "seedMs": 64097.604,
+  "warmRuns": 25,
+  "p50Ms": 29.34,
+  "p95Ms": 31.476,
+  "renderedTokens": 435,
+  "thresholdP95Ms": 100,
+  "pass": true
+}

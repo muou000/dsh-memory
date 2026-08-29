@@ -1,0 +1,8 @@
+{
+  "format": "dsh-memory-model-evaluation",
+  "version": 1,
+  "status": "NOT RUN",
+  "reason": "A deployment-specific DSH model route, held-out task set, and evaluator were not supplied.",
+  "requiredRuns": 5,
+  "pass": false
+}

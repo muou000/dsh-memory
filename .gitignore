@@ -1,0 +1,8 @@
+lib/
+dist/
+coverage/
+node_modules/
+.memory-data/
+evals/.runs/
+*.tgz
+*.log
