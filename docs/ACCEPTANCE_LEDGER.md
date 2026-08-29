@@ -14,7 +14,7 @@ evidence exists and covers the complete gate.
 | Versioned governance state machine | PASS | `tests/store-governance.spec.ts`; `tests/backup.spec.ts` |
 | ACID persistence, migration, crash recovery | NOT RUN | Integration/fault tests |
 | Scope isolation, privacy, prompt safety | PASS | `tests/scope-retrieval.spec.ts`; `tests/security.spec.ts` |
-| Held-out retrieval quality thresholds | PASS | `evals/reports/keyless-latest.json` (Recall@6 1.00, Precision@6 0.806, MRR 1.00, cross-workspace 0) |
+| Held-out retrieval quality thresholds | PASS | `evals/reports/keyless-latest.json` (Recall@6 1.00, Precision@6 0.806, MRR 0.917, cross-workspace 0) |
 | 10k-record latency and rebuild | PASS | `evals/reports/benchmark-latest.json` (p95 31.476ms on Node v26.8.1) |
 | Human-readable deterministic Markdown | NOT RUN | Golden/manual review |
 | Observability, health, and lifecycle quiescence | NOT RUN | Integration tests |
@@ -22,4 +22,4 @@ evidence exists and covers the complete gate.
 | Windows and Unix-like supported matrix | NOT RUN | CI evidence |
 | Packed-artifact clean install and dependency audit | NOT RUN | Release evidence |
 | Shadow/canary observation | NOT RUN | Deployment report |
-| Parent submodule pin and combined checks | NOT RUN | Parent check output |
+| Parent submodule pin and combined checks | PASS | Top-level `scripts/check-all.ps1`; initialized `git submodule status --recursive` |

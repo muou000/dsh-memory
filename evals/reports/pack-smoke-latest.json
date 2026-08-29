@@ -1,0 +1,14 @@
+{
+  "format": "dsh-memory-pack-smoke",
+  "version": 1,
+  "status": "PASS",
+  "node": "v26.8.1",
+  "package": "dsh-memory@0.1.0",
+  "checks": {
+    "cleanInstallFromTarball": true,
+    "publicImport": true,
+    "cliHelp": true,
+    "restoreExportExported": true
+  },
+  "note": "Installed from pnpm pack output in a fresh temporary project with @deepseek-ai/cordis@4.0.1."
+}
