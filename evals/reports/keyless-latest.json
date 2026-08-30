@@ -1,9 +1,25 @@
 {
   "format": "dsh-memory-keyless-evaluation",
   "version": 1,
-  "startedAt": "2026-08-29T11:46:00.543Z",
-  "finishedAt": "2026-08-29T11:46:00.643Z",
+  "startedAt": "2026-08-30T03:39:28.234Z",
+  "finishedAt": "2026-08-30T03:39:28.586Z",
   "node": "v26.8.1",
+  "sourceRevision": "ee1e736cd423f7d38171a34ddacb09ba438d6365",
+  "sourceDirty": true,
+  "config": {
+    "retrievalCandidateLimit": 24,
+    "maxInjectedItems": 6,
+    "injectionTokenBudget": 1200,
+    "minConfidence": 0.6,
+    "injectedKinds": [
+      "episodic",
+      "semantic",
+      "procedural"
+    ],
+    "secretPolicy": "reject",
+    "logQueryText": false
+  },
+  "configSha256": "b6e3774e46f09cf5b9f65309e170b2f70b3c7502ab0c4511301acafb531155d2",
   "metrics": {
     "cases": 6,
     "recallAt6": 1,

@@ -1,0 +1,36 @@
+{
+  "format": "dsh-memory-operator-rehearsal",
+  "version": 1,
+  "status": "PASS",
+  "pass": true,
+  "startedAt": "2026-08-30T03:39:28.312Z",
+  "finishedAt": "2026-08-30T03:39:30.091Z",
+  "node": "v26.8.1",
+  "sourceRevision": "ee1e736cd423f7d38171a34ddacb09ba438d6365",
+  "sourceDirty": true,
+  "config": {
+    "markdownProjection": false,
+    "readOnly": false,
+    "integrityCheckOnStart": true,
+    "reviewedCandidateRetentionDays": 365,
+    "queryTextRetentionDays": 7,
+    "retrievalRetentionDays": 180,
+    "feedbackRetentionDays": 365,
+    "auditRetentionDays": 3650
+  },
+  "configSha256": "8425e249489a814aca61a3a22bc69aad0e586aa2129b6a63f91ad9c0f0aca2dc",
+  "durationMs": 1779.435,
+  "checkCount": 10,
+  "checks": {
+    "candidateInspection": true,
+    "humanPublication": true,
+    "healthReadable": true,
+    "projectionIntegrity": true,
+    "sqliteBackup": true,
+    "portableExport": true,
+    "portableImport": true,
+    "importProjectionIntegrity": true,
+    "sqliteRestore": true,
+    "rollbackTargetReadable": true
+  }
+}

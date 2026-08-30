@@ -1,8 +1,9 @@
 {
   "format": "dsh-memory-model-evaluation",
   "version": 1,
+  "generatedAt": "2026-08-29T13:20:36.929Z",
   "status": "NOT RUN",
-  "reason": "A deployment-specific DSH model route, held-out task set, and evaluator were not supplied.",
+  "reason": "Supply --dataset and --observations from a frozen held-out paired DSH experiment.",
   "requiredRuns": 5,
   "pass": false
 }

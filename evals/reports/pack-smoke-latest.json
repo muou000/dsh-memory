@@ -1,14 +1,21 @@
 {
   "format": "dsh-memory-pack-smoke",
-  "version": 1,
+  "version": 2,
   "status": "PASS",
+  "pass": true,
+  "releaseEligible": false,
+  "finishedAt": "2026-08-30T04:10:54.760Z",
   "node": "v26.8.1",
-  "package": "dsh-memory@0.1.0",
+  "package": "dsh-memory-0.1.0",
+  "tarballSha256": "176b5001df8580f9ce428f9e9c9265f410ceaefcefac57b2070b5abb6f72ad77",
+  "tarballBytes": 74074,
+  "sourceRevision": "ee1e736cd423f7d38171a34ddacb09ba438d6365",
+  "sourceDirty": true,
   "checks": {
+    "packProduced": true,
     "cleanInstallFromTarball": true,
     "publicImport": true,
     "cliHelp": true,
-    "restoreExportExported": true
-  },
-  "note": "Installed from pnpm pack output in a fresh temporary project with @deepseek-ai/cordis@4.0.1."
+    "productionAudit": true
+  }
 }
