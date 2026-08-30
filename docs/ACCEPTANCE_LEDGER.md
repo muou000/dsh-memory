@@ -30,4 +30,4 @@ the real-model, human, CI-matrix, or rollout gates marked `NOT RUN`.
 | Exact-commit Windows/Ubuntu Node 22/24 CI matrix | NOT RUN | Local Windows Node 26 checks pass; the existing Unix report predates this candidate and no successful four-leg workflow run is attached |
 | Packed-artifact clean install and dependency audit | PASS | `evals/reports/pack-smoke-latest.json`; clean tarball install, public import, CLI, and production audit all true |
 | Shadow/canary observation | NOT RUN | No deployment observation supplied |
-| Parent submodule pin and combined checks | NOT RUN | Pending the evidence-only report commit, parent gitlink update, and top-level `scripts/check-all.ps1` run |
+| Parent submodule pin and combined checks | PASS | Parent gitlink is pinned after the evidence-only report commit; top-level `scripts/check-all.ps1` completed with all 3 plugin checks passing |
