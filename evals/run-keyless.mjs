@@ -22,7 +22,9 @@ const evaluationConfig = {
   logQueryText: config.logQueryText,
 }
 const sourceRevision = process.env.DSH_MEMORY_SOURCE_REVISION ?? gitRevision()
-const sourceDirty = gitDirty()
+const sourceDirty = process.env.DSH_MEMORY_SOURCE_DIRTY === undefined
+  ? gitDirty()
+  : process.env.DSH_MEMORY_SOURCE_DIRTY === 'true'
 const store = new MemoryStore(config)
 
 function publish(subject, action, scope = workspace, now = 1_000) {

@@ -59,6 +59,8 @@ tar -C "$source_root" \
   -cf - . | tar -C "$temporary_root/source" -xf -
 
 cd "$temporary_root/source"
+export DSH_MEMORY_SOURCE_REVISION="$source_revision"
+export DSH_MEMORY_SOURCE_DIRTY="$source_dirty"
 pnpm install --frozen-lockfile --registry=https://registry.npmjs.org
 pnpm run check
 pnpm run test:integration
