@@ -936,7 +936,9 @@ export class MemoryStore {
       ...scopeValues,
     ]
     const countRow = this.firstRow(
-      `SELECT COUNT(DISTINCT r.id) AS count
+      // The startup integrity check enforces one derived FTS row per record;
+      // avoid building a temporary DISTINCT set on every warm retrieval.
+      `SELECT COUNT(*) AS count
        FROM memory_fts
        JOIN memory_records r ON r.id = memory_fts.memory_id
        WHERE ${whereSql}`,
