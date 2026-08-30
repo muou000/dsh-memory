@@ -23,7 +23,8 @@ entry points are implemented. Windows and Ubuntu keyless checks pass. A
 one-case paired real-model pilot passed with baseline success `0/5` and memory
 candidate success `5/5`, but is explicitly not release eligible. Production
 acceptance is still blocked on a release-class held-out model suite,
-representative human page review, and shadow/canary evidence; see
+conventional held-out retrieval evidence, representative human page review, an
+exact-commit Node 22/24 Windows/Ubuntu CI matrix, and shadow/canary evidence; see
 [`docs/ACCEPTANCE_LEDGER.md`](docs/ACCEPTANCE_LEDGER.md).
 
 Supported target versions are Node.js `^22.19.0 || >=24`, pnpm 10, Cordis 4,

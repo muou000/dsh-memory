@@ -1,14 +1,17 @@
 # Acceptance ledger
 
-Candidate code revision: `89cfd4f4f6189f68427351e87cb892c8975f2de6`
+Runtime candidate revision: `89cfd4f4f6189f68427351e87cb892c8975f2de6`
+
+Evaluation harness revision: `1513c2c938d491a1db7171715a21e5f6aafd945d`
 
 DSH revision: `cd5ef8148158c3a752a658978873241fdf8e2bbc`
 Standard revision: 2026-08-30
 
 This ledger is fail-closed. A row is `PASS` only when its evidence is bound to
-the candidate code revision above and the complete gate is covered. A passing
-deterministic row does not substitute for the real-model, human, or rollout
-gates marked `NOT RUN`.
+the runtime candidate or the exact evaluation/package revision and hashes named
+in its report, and the complete gate is covered. Evidence-only descendants must
+not change runtime sources. A passing deterministic row does not substitute for
+the real-model, human, CI-matrix, or rollout gates marked `NOT RUN`.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
@@ -24,7 +27,7 @@ gates marked `NOT RUN`.
 | Human-readable deterministic Markdown | NOT RUN | Automated golden/escaping/link/hash tests pass; representative human sign-off is pending |
 | Observability, health, and lifecycle quiescence | PASS | `tests/observability.spec.ts`; clean Loader integration |
 | Backup, restore, migration, rollback runbooks | PASS | `evals/reports/operator-rehearsal-latest.json`; 10/10 checks passed, including backup/export/import/restore/rollback |
-| Windows and Unix-like supported matrix | PASS | Windows clean check plus `evals/reports/unix-smoke-latest.json` (Ubuntu 24.04, Node 24.20.0, frozen install/Loader/keyless all true); full CI Node 22/24 matrix remains required |
+| Exact-commit Windows/Ubuntu Node 22/24 CI matrix | NOT RUN | Local Windows checks and `evals/reports/unix-smoke-latest.json` (Ubuntu 24.04, Node 24.20.0) pass, but no successful four-leg workflow run is attached to the candidate |
 | Packed-artifact clean install and dependency audit | PASS | `evals/reports/pack-smoke-latest.json`; clean tarball install, public import, CLI, and production audit all true |
 | Shadow/canary observation | NOT RUN | No deployment observation supplied |
 | Parent submodule pin and combined checks | PASS | Top-level gitlink points to this committed plugin evidence revision; `scripts/check-all.ps1` passed both plugins and `git submodule status --recursive` is clean |
