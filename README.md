@@ -28,8 +28,8 @@ exact-commit Node 22/24 Windows/Ubuntu CI matrix, and shadow/canary evidence; se
 [`docs/ACCEPTANCE_LEDGER.md`](docs/ACCEPTANCE_LEDGER.md).
 
 Supported target versions are Node.js `^22.19.0 || >=24`, pnpm 10, Cordis 4,
-and the DSH `0.1.1-rc.2` public package surface. Exact validated revisions will
-be recorded in the release report.
+and the DSH `0.1.1-rc.2` or `0.1.2-alpha.1` public package surface. Exact
+validated revisions are recorded in the evaluation reports.
 
 ## Install
 
@@ -70,6 +70,12 @@ view; publish, correction, deletion, backup, and rollback go through the
 service or the administrative CLI. The complete lifecycle and rollback steps
 are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
 
+The first projection, a restore/import, and an explicit repair still perform a
+full canonical rebuild. Once a verified generation is ready, ordinary bounded
+mutations publish only the affected record pages and global review/index pages;
+unchanged files are reused by content hash. A missing or inconsistent manifest
+forces a full rebuild. `projection-status` always re-hashes the complete view.
+
 The default canonical store lives under `<DSH_HOME>/memory/v1`; the sibling
 `knowledge/README.md` is the human entry point. Use absolute configured paths
 for managed or encrypted storage. Agents can search/read verified knowledge,
@@ -77,5 +83,7 @@ submit candidates, and attach feedback; only trusted operators can publish,
 change lifecycle state, resolve conflicts, prune telemetry, or purge content.
 
 Use `dsh-memory candidates`, `maintenance`, `metrics`, and `projection-status`
-for routine review. Full configuration, backup, migration, rollback, retention,
-and release procedures are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+for routine review. Projection metrics distinguish full rebuilds, incremental
+updates, files written, and failures without logging record content. Full
+configuration, backup, migration, rollback, retention, and release procedures
+are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).

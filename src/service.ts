@@ -51,6 +51,9 @@ export class MemoryService extends Service {
   private lastProjectionAt: number | undefined
   private lastProjectionError: string | undefined
   private projectionFailureCount = 0
+  private projectionFullRebuildCount = 0
+  private projectionIncrementalUpdateCount = 0
+  private projectionFilesWritten = 0
 
   constructor(ctx: Context, config: ResolvedConfig) {
     super(ctx, 'memories')
@@ -95,7 +98,7 @@ export class MemoryService extends Service {
       candidate.similarMemoryIds.length,
       observed.durationMs,
     )
-    this.refreshProjection('propose')
+    this.refreshProjection('propose', [])
     return candidate
   }
 
@@ -109,7 +112,11 @@ export class MemoryService extends Service {
       candidate.publishedMemoryId ?? 'none',
       observed.durationMs,
     )
-    this.refreshProjection('review')
+    this.refreshProjection('review', [
+      ...(candidate.publishedMemoryId === undefined ? [] : [candidate.publishedMemoryId]),
+      ...(candidate.targetMemoryId === undefined ? [] : [candidate.targetMemoryId]),
+      ...candidate.similarMemoryIds,
+    ])
     return candidate
   }
 
@@ -124,14 +131,14 @@ export class MemoryService extends Service {
       record.status,
       observed.durationMs,
     )
-    this.refreshProjection(input.action)
+    this.refreshProjection(input.action, [record.memoryId])
     return record
   }
 
   purge(memoryId: string, actor: MemoryActor, reason: string, now?: number): void {
     const observed = this.observe('purge', () => this.store.purge(memoryId, actor, reason, now))
     this.log.info('stage=purge outcome=success memory_id=%s duration_ms=%f', memoryId, observed.durationMs)
-    this.refreshProjection('purge')
+    this.refreshProjection('purge', [memoryId])
   }
 
   get(memoryId: string, access: MemoryAccessContext, includeEvidence = true, includeInactive = false, now?: number): MemoryRecord | undefined {
@@ -180,7 +187,7 @@ export class MemoryService extends Service {
       input.action,
       observed.durationMs,
     )
-    this.refreshProjection('resolve-conflict')
+    this.refreshProjection('resolve-conflict', [conflict.leftMemoryId, conflict.rightMemoryId])
     return conflict
   }
 
@@ -229,7 +236,7 @@ export class MemoryService extends Service {
       input.retrievalId ?? 'none',
       observed.durationMs,
     )
-    this.refreshProjection('feedback')
+    this.refreshProjection('feedback', [input.memoryId])
   }
 
   stats(): MemoryStats {
@@ -258,7 +265,7 @@ export class MemoryService extends Service {
       result.auditRowsDeleted,
       observed.durationMs,
     )
-    this.refreshProjection('prune')
+    this.refreshProjection('prune', result.feedbackDeleted > 0 ? undefined : [])
     return result
   }
 
@@ -267,6 +274,9 @@ export class MemoryService extends Service {
     return Object.freeze({
       ...metrics,
       projectionFailures: this.projectionFailureCount,
+      projectionFullRebuilds: this.projectionFullRebuildCount,
+      projectionIncrementalUpdates: this.projectionIncrementalUpdateCount,
+      projectionFilesWritten: this.projectionFilesWritten,
     })
   }
 
@@ -311,22 +321,43 @@ export class MemoryService extends Service {
     }
   }
 
-  private refreshProjection(stage: string): void {
+  private refreshProjection(stage: string, recordIds?: readonly string[]): void {
     if (!this.config.markdownProjection || this.config.readOnly) {
       this.projectionState = 'disabled'
       return
     }
+    const started = performance.now()
     try {
-      this.projection.rebuild(this.store)
+      const publication = this.projectionState === 'ready' && recordIds !== undefined
+        ? this.projection.refresh(this.store, recordIds)
+        : this.projection.rebuild(this.store)
+      if (publication.mode === 'full') this.projectionFullRebuildCount += 1
+      else this.projectionIncrementalUpdateCount += 1
+      this.projectionFilesWritten += publication.writtenFiles
       this.projectionState = 'ready'
       this.lastProjectionAt = Date.now()
       this.lastProjectionError = undefined
+      this.log.debug(
+        'stage=projection outcome=ready trigger=%s mode=%s written_files=%d reused_files=%d removed_files=%d total_files=%d duration_ms=%f',
+        stage,
+        publication.mode,
+        publication.writtenFiles,
+        publication.reusedFiles,
+        publication.removedFiles,
+        publication.totalFiles,
+        performance.now() - started,
+      )
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.projectionState = 'degraded'
       this.projectionFailureCount += 1
       this.lastProjectionError = `stage=${stage}: ${message}`
-      this.log.error('stage=projection outcome=degraded trigger=%s code=write_failed failure_count=%d', stage, this.projectionFailureCount)
+      this.log.error(
+        'stage=projection outcome=degraded trigger=%s code=write_failed failure_count=%d duration_ms=%f',
+        stage,
+        this.projectionFailureCount,
+        performance.now() - started,
+      )
     }
   }
 }

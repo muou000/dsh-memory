@@ -33,6 +33,7 @@ const benchmarkConfig = {
 const store = new MemoryStore(config)
 const actor = { kind: 'migration', id: 'benchmark' }
 const reviewer = { kind: 'human', id: 'benchmark-reviewer' }
+let mutationTarget
 const began = performance.now()
 for (let index = 0; index < count; index += 1) {
   const candidate = store.propose({
@@ -51,19 +52,36 @@ for (let index = 0; index < count; index += 1) {
     actor,
     now: index + 1,
   })
-  store.review(candidate.id, {
+  const reviewed = store.review(candidate.id, {
     action: 'publish', actor: reviewer,
     reason: 'Synthetic benchmark fixture was reviewed.', now: index + 2,
   })
+  if (index === count - 1) mutationTarget = reviewed.publishedMemoryId
 }
+if (mutationTarget === undefined) throw new Error('benchmark failed to retain its mutation target')
 const seedMs = performance.now() - began
 const indexStarted = performance.now()
 store.rebuildFts()
 const indexRebuildMs = performance.now() - indexStarted
 const projection = new MarkdownProjection(config)
+const projectionNow = count + 20
 const projectionStarted = performance.now()
-projection.rebuild(store, count + 10)
-const projectionRebuildMs = performance.now() - projectionStarted
+const initialPublication = projection.rebuild(store, projectionNow)
+const projectionInitialRebuildMs = performance.now() - projectionStarted
+const warmProjectionStarted = performance.now()
+const warmPublication = projection.rebuild(store, projectionNow)
+const projectionWarmRebuildMs = performance.now() - warmProjectionStarted
+store.feedback({
+  id: 'benchmark-incremental-feedback',
+  memoryId: mutationTarget,
+  revision: 1,
+  kind: 'helpful',
+  actor: reviewer,
+  now: count + 10,
+})
+const incrementalProjectionStarted = performance.now()
+const incrementalPublication = projection.refresh(store, [mutationTarget], projectionNow)
+const projectionIncrementalUpdateMs = performance.now() - incrementalProjectionStarted
 const projectionVerification = projection.verify()
 const access = { workspace, includeGlobal: false, maxSensitivity: 'internal' }
 const timings = []
@@ -77,7 +95,7 @@ for (let run = 0; run < 25; run += 1) {
 timings.sort((left, right) => left - right)
 const percentile = value => timings[Math.min(timings.length - 1, Math.floor(timings.length * value))]
 const report = {
-  format: 'dsh-memory-benchmark', version: 1, records: count, node: process.version,
+  format: 'dsh-memory-benchmark', version: 2, records: count, node: process.version,
   platform, arch, sourceRevision,
   sourceDirty,
   config: benchmarkConfig,
@@ -85,16 +103,29 @@ const report = {
   totalMemoryBytes: totalmem(),
   seedMs: Number(seedMs.toFixed(3)), warmRuns: timings.length,
   indexRebuildMs: Number(indexRebuildMs.toFixed(3)),
-  projectionRebuildMs: Number(projectionRebuildMs.toFixed(3)),
+  projectionRebuildMs: Number(projectionInitialRebuildMs.toFixed(3)),
+  projectionInitialRebuildMs: Number(projectionInitialRebuildMs.toFixed(3)),
+  projectionWarmRebuildMs: Number(projectionWarmRebuildMs.toFixed(3)),
+  projectionIncrementalUpdateMs: Number(projectionIncrementalUpdateMs.toFixed(3)),
+  projectionPublications: { initial: initialPublication, warm: warmPublication, incremental: incrementalPublication },
   projectionFiles: projectionVerification.fileCount,
   projectionValid: projectionVerification.valid,
   p50Ms: Number(percentile(0.5).toFixed(3)), p95Ms: Number(percentile(0.95).toFixed(3)),
   renderedTokens: last?.estimatedTokens ?? 0,
   seedNote: `${count.toLocaleString('en-US')} records were admitted through the real proposal/publication state machine with near-duplicate hints disabled for unique synthetic data; this is fixture preparation cost, not retrieval latency.`,
   thresholdP95Ms: 100,
+  thresholdProjectionWarmMs: 15_000,
+  thresholdProjectionIncrementalMs: 5_000,
   pass: percentile(0.95) <= 100
     && projectionVerification.valid
-    && projectionVerification.fileCount === count + 4,
+    && projectionVerification.fileCount === count + 4
+    && projectionWarmRebuildMs <= 15_000
+    && projectionIncrementalUpdateMs <= 5_000
+    && warmPublication.mode === 'full'
+    && warmPublication.writtenFiles === 0
+    && incrementalPublication.mode === 'incremental'
+    && incrementalPublication.writtenFiles === 1
+    && incrementalPublication.totalFiles === count + 4,
 }
 report.releaseEligible = report.pass && !sourceDirty
 const output = process.env.DSH_MEMORY_BENCHMARK_OUTPUT ?? join('evals', 'reports', 'benchmark-latest.json')

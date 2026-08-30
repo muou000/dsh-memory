@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { MemoryService } from '../src/service.ts'
@@ -82,6 +82,77 @@ describe('MarkdownProjection', () => {
     expect(service.projection.verify().valid).toBe(true)
   })
 
+  it('publishes a known record change incrementally and remains byte-identical to a full rebuild', () => {
+    home = temporaryMemoryHome({ markdownProjection: true })
+    ctx = new Context()
+    const service = new MemoryService(ctx, home.config)
+    for (let index = 0; index < 2; index += 1) {
+      const candidate = service.propose({
+        content: draft({ subject: `Incremental projection ${index}` }),
+        actor: proposer,
+        now: 1_000 + index,
+      })
+      service.review(candidate.id, {
+        action: 'publish', actor: reviewer, reason: 'Verified.', now: 2_000 + index,
+      })
+    }
+    const record = service.listRecords()[0]!
+    service.projection.rebuild(service.store, 10_000)
+    service.store.feedback({
+      id: 'incremental-projection-feedback',
+      memoryId: record.memoryId,
+      revision: record.revision,
+      kind: 'helpful',
+      actor: reviewer,
+      now: 3_000,
+    })
+
+    const publication = service.projection.refresh(service.store, [record.memoryId], 10_000)
+    expect(publication).toEqual({
+      mode: 'incremental',
+      writtenFiles: 1,
+      reusedFiles: 5,
+      removedFiles: 0,
+      totalFiles: 6,
+    })
+    const incremental = projectionFiles(home.config.projectionPath)
+    const rebuilt = service.projection.rebuild(service.store, 10_000)
+    expect(rebuilt).toEqual({
+      mode: 'full',
+      writtenFiles: 0,
+      reusedFiles: 6,
+      removedFiles: 0,
+      totalFiles: 6,
+    })
+    expect(projectionFiles(home.config.projectionPath)).toEqual(incremental)
+  })
+
+  it('uses incremental projection publication for bounded service mutations', () => {
+    home = temporaryMemoryHome({ markdownProjection: true })
+    ctx = new Context()
+    const service = new MemoryService(ctx, home.config)
+    const candidate = service.propose({ content: draft(), actor: proposer, now: 1_000 })
+    service.review(candidate.id, { action: 'publish', actor: reviewer, reason: 'Verified.', now: 2_000 })
+    const record = service.listRecords()[0]!
+    const refresh = vi.spyOn(service.projection, 'refresh')
+
+    service.feedback({
+      id: 'service-incremental-feedback',
+      memoryId: record.memoryId,
+      revision: record.revision,
+      kind: 'helpful',
+      actor: reviewer,
+      now: 3_000,
+    })
+
+    expect(refresh).toHaveBeenCalledWith(service.store, [record.memoryId])
+    expect(service.metrics(4_000)).toMatchObject({
+      projectionFullRebuilds: 1,
+      projectionIncrementalUpdates: 3,
+      projectionFilesWritten: expect.any(Number),
+    })
+  })
+
   it('keeps committed canonical mutations usable when the human projection is degraded', () => {
     home = temporaryMemoryHome({ markdownProjection: true })
     mkdirSync(dirname(home.config.projectionPath), { recursive: true })
@@ -156,4 +227,11 @@ function assertProjectionLinks(root: string, pages: readonly string[]): void {
       expect(existsSync(resolve(dirname(path), target)), `${page} links to ${target}`).toBe(true)
     }
   }
+}
+
+function projectionFiles(root: string): ReadonlyMap<string, string> {
+  return new Map(readdirSync(root, { recursive: true })
+    .map(item => String(item))
+    .filter(item => item.endsWith('.md') || item === '.dsh-memory-manifest.json')
+    .map(item => [item, readFileSync(join(root, item), 'utf8')]))
 }

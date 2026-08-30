@@ -81,6 +81,17 @@ interface RetrievalComparable {
   readonly turn: number | null
 }
 
+interface RevisionDecodeContext {
+  readonly evidenceRows: readonly SqlRow[]
+  readonly parentRow?: SqlRow
+}
+
+interface RecordDecodeContext extends RevisionDecodeContext {
+  readonly revisionRow: SqlRow
+  readonly firstRevisionRow: SqlRow
+  readonly latestRevision: number
+}
+
 const SENSITIVITY_LEVEL: Readonly<Record<MemorySensitivity, number>> = {
   public: 0,
   internal: 1,
@@ -508,20 +519,95 @@ export class MemoryStore {
     if (statuses.length === 0) return []
     for (const status of statuses) assertRecordStatus(status)
     const placeholders = statuses.map(() => '?').join(', ')
-    return this.rows(
+    const records = this.rows(
       `SELECT * FROM memory_records WHERE status IN (${placeholders}) ORDER BY scope_type, scope_key, subject, id`,
       ...statuses,
-    ).map(row => this.decodeRecordRow(row, true))
+    )
+    const currentRevisions = indexUniqueRows(this.rows(
+      `SELECT v.* FROM memory_revisions v
+       JOIN memory_records r ON r.id = v.memory_id AND r.current_revision = v.revision
+       WHERE r.status IN (${placeholders})`,
+      ...statuses,
+    ), row => readString(row, 'memory_id'), 'current revisions')
+    const firstRevisions = indexUniqueRows(this.rows(
+      `SELECT v.memory_id, v.created_at FROM memory_revisions v
+       JOIN memory_records r ON r.id = v.memory_id
+       WHERE v.revision = 1 AND r.status IN (${placeholders})`,
+      ...statuses,
+    ), row => readString(row, 'memory_id'), 'first revisions')
+    const latestRevisions = indexUniqueRows(this.rows(
+      `SELECT v.memory_id, MAX(v.revision) AS revision FROM memory_revisions v
+       JOIN memory_records r ON r.id = v.memory_id
+       WHERE r.status IN (${placeholders}) GROUP BY v.memory_id`,
+      ...statuses,
+    ), row => readString(row, 'memory_id'), 'latest revisions')
+    const parentRevisions = indexUniqueRows(this.rows(
+      `SELECT v.* FROM memory_revisions v
+       JOIN memory_records r ON r.id = v.memory_id AND v.revision = r.current_revision - 1
+       WHERE r.current_revision > 1 AND r.status IN (${placeholders})`,
+      ...statuses,
+    ), row => readString(row, 'memory_id'), 'parent revisions')
+    const evidence = groupEvidenceRows(this.rows(
+      `SELECT e.* FROM memory_evidence e
+       JOIN memory_records r ON r.id = e.memory_id AND r.current_revision = e.revision
+       WHERE r.status IN (${placeholders}) ORDER BY e.memory_id, e.revision, e.ordinal`,
+      ...statuses,
+    ))
+    return records.map(row => {
+      const memoryId = readString(row, 'id')
+      const revisionRow = currentRevisions.get(memoryId)
+      const firstRevisionRow = firstRevisions.get(memoryId)
+      const latestRevisionRow = latestRevisions.get(memoryId)
+      if (revisionRow === undefined) throw new Error(`dsh-memory decode: missing current revision ${memoryId}`)
+      if (firstRevisionRow === undefined) throw new Error(`dsh-memory decode: missing first revision ${memoryId}`)
+      if (latestRevisionRow === undefined) throw new Error(`dsh-memory decode: missing latest revision ${memoryId}`)
+      const revision = assertPositiveInteger(readNumber(revisionRow, 'revision'), 'record.revision')
+      const parentRow = revision === 1 ? undefined : parentRevisions.get(memoryId)
+      if (revision > 1 && parentRow === undefined) {
+        throw new Error(`dsh-memory decode: missing parent revision ${memoryId}@${revision - 1}`)
+      }
+      return this.decodeRecordRow(row, true, {
+        revisionRow,
+        firstRevisionRow,
+        latestRevision: assertPositiveInteger(readNumber(latestRevisionRow, 'revision'), 'record.latestRevision'),
+        evidenceRows: evidence.get(revisionKey(memoryId, revision)) ?? [],
+        ...(parentRow === undefined ? {} : { parentRow }),
+      })
+    })
   }
 
   listRevisions(memoryId?: string): readonly MemoryRevision[] {
-    const rows = memoryId === undefined
+    const normalizedId = memoryId === undefined ? undefined : normalizeIdentifier(memoryId, 'memoryId')
+    const rows = normalizedId === undefined
       ? this.rows('SELECT * FROM memory_revisions ORDER BY memory_id, revision')
       : this.rows(
           'SELECT * FROM memory_revisions WHERE memory_id = ? ORDER BY revision',
-          normalizeIdentifier(memoryId, 'memoryId'),
+          normalizedId,
         )
-    return rows.map(row => this.decodeRevisionRow(row, true))
+    const evidenceRows = normalizedId === undefined
+      ? this.rows('SELECT * FROM memory_evidence ORDER BY memory_id, revision, ordinal')
+      : this.rows(
+          'SELECT * FROM memory_evidence WHERE memory_id = ? ORDER BY revision, ordinal',
+          normalizedId,
+        )
+    const evidence = groupEvidenceRows(evidenceRows)
+    const revisions = indexUniqueRows(
+      rows,
+      row => revisionKey(readString(row, 'memory_id'), readNumber(row, 'revision')),
+      'revisions',
+    )
+    return rows.map(row => {
+      const id = readString(row, 'memory_id')
+      const revision = assertPositiveInteger(readNumber(row, 'revision'), 'revision.revision')
+      const parentRow = revision === 1 ? undefined : revisions.get(revisionKey(id, revision - 1))
+      if (revision > 1 && parentRow === undefined) {
+        throw new Error(`dsh-memory decode: missing parent revision ${id}@${revision - 1}`)
+      }
+      return this.decodeRevisionRow(row, true, {
+        evidenceRows: evidence.get(revisionKey(id, revision)) ?? [],
+        ...(parentRow === undefined ? {} : { parentRow }),
+      })
+    })
   }
 
   listConflicts(status: 'open' | 'resolved' = 'open'): readonly MemoryConflict[] {
@@ -565,8 +651,12 @@ export class MemoryStore {
    * Evaluate expiry, inactivity, and negative-feedback rules without mutating
    * canonical records. Operators can review the deterministic nominations and
    * choose an explicit transition.
+   * @param recordsInput Internal derived views may reuse an already decoded canonical snapshot.
    */
-  maintenance(options: MemoryMaintenanceOptions = {}): MemoryMaintenanceResult {
+  maintenance(
+    options: MemoryMaintenanceOptions = {},
+    recordsInput?: readonly MemoryRecord[],
+  ): MemoryMaintenanceResult {
     assertObjectInput(options, 'maintenance')
     const now = normalizeNow(options.now)
     const expiringWithinHours = options.expiringWithinHours ?? this.config.maintenanceExpiringWithinHours
@@ -580,7 +670,11 @@ export class MemoryStore {
     assertBoundedInteger(unusedAfterDays, 'maintenance.unusedAfterDays', 1, 3650)
     assertBoundedInteger(limit, 'maintenance.limit', 1, 1_000)
 
-    const records = this.listRecords(['active'])
+    if (recordsInput !== undefined
+      && (!Array.isArray(recordsInput) || recordsInput.some(record => record.status !== 'active'))) {
+      throw new Error('dsh-memory maintenance records must be an array of active canonical records')
+    }
+    const records = recordsInput ?? this.listRecords(['active'])
     const expiringCutoff = now + expiringWithinHours * 60 * 60 * 1_000
     const unusedCutoff = now - unusedAfterDays * 86_400_000
     let expiredCount = 0
@@ -1983,20 +2077,21 @@ export class MemoryStore {
     return row === undefined ? undefined : this.decodeCandidateRow(row)
   }
 
-  private decodeRecordRow(row: SqlRow, includeEvidence: boolean): MemoryRecord {
+  private decodeRecordRow(row: SqlRow, includeEvidence: boolean, context?: RecordDecodeContext): MemoryRecord {
     const memoryId = normalizeIdentifier(readString(row, 'id'), 'record.memoryId')
     const revision = assertPositiveInteger(readNumber(row, 'current_revision'), 'record.revision')
-    const revisionRow = this.firstRow(
-      'SELECT * FROM memory_revisions WHERE memory_id = ? AND revision = ?',
-      memoryId,
-      revision,
+    const revisionRow = context?.revisionRow ?? this.firstRow(
+      'SELECT * FROM memory_revisions WHERE memory_id = ? AND revision = ?', memoryId, revision,
     )
     if (revisionRow === undefined) throw new Error(`dsh-memory decode: missing revision ${memoryId}@${revision}`)
-    const base = this.decodeRevisionRow(revisionRow, includeEvidence)
+    const base = this.decodeRevisionRow(revisionRow, includeEvidence, context === undefined ? undefined : {
+      evidenceRows: context.evidenceRows,
+      ...(context.parentRow === undefined ? {} : { parentRow: context.parentRow }),
+    })
     const status = readStatus(row)
     const updatedAt = normalizeNow(readNumber(row, 'updated_at'))
     assertRecordHeadMatchesRevision(row, base, status, updatedAt)
-    const firstRevisionRow = this.firstRow(
+    const firstRevisionRow = context?.firstRevisionRow ?? this.firstRow(
       'SELECT created_at FROM memory_revisions WHERE memory_id = ? AND revision = 1',
       memoryId,
     )
@@ -2008,11 +2103,14 @@ export class MemoryStore {
     if (updatedAt < createdAt) {
       throw new Error(`dsh-memory decode: record updated_at precedes creation ${memoryId}`)
     }
-    const latestRow = this.firstRow(
-      'SELECT MAX(revision) AS revision FROM memory_revisions WHERE memory_id = ?',
-      memoryId,
-    )
-    if (latestRow === undefined || readNumber(latestRow, 'revision') !== revision) {
+    const latestRow = context === undefined
+      ? this.firstRow('SELECT MAX(revision) AS revision FROM memory_revisions WHERE memory_id = ?', memoryId)
+      : undefined
+    if (context === undefined && latestRow === undefined) {
+      throw new Error(`dsh-memory decode: missing latest revision ${memoryId}`)
+    }
+    const latestRevision = context?.latestRevision ?? readNumber(latestRow!, 'revision')
+    if (latestRevision !== revision) {
       throw new Error(`dsh-memory decode: record head is not the latest revision ${memoryId}@${revision}`)
     }
     const lastUsedAt = readOptionalNumber(row, 'last_used_at')
@@ -2033,7 +2131,7 @@ export class MemoryStore {
     })
   }
 
-  private decodeRevisionRow(row: SqlRow, includeEvidence: boolean): MemoryRevision {
+  private decodeRevisionRow(row: SqlRow, includeEvidence: boolean, context?: RevisionDecodeContext): MemoryRevision {
     const memoryId = normalizeIdentifier(readString(row, 'memory_id'), 'revision.memoryId')
     const revision = assertPositiveInteger(readNumber(row, 'revision'), 'revision.revision')
     const createdAt = normalizeNow(readNumber(row, 'created_at'))
@@ -2043,12 +2141,10 @@ export class MemoryStore {
       if (revision === 1 || !Number.isSafeInteger(parentRevision) || parentRevision !== revision - 1) {
         throw new Error(`dsh-memory decode: invalid parent revision ${memoryId}@${revision}`)
       }
-      parentRow = this.firstRow(
+      parentRow = context?.parentRow ?? this.firstRow(
         `SELECT revision, operation, status, actor_kind, actor_id, kind, scope_type,
            scope_key, sensitivity, content_hash, created_at
-         FROM memory_revisions WHERE memory_id = ? AND revision = ?`,
-        memoryId,
-        parentRevision,
+         FROM memory_revisions WHERE memory_id = ? AND revision = ?`, memoryId, parentRevision,
       )
       if (parentRow === undefined) throw new Error(`dsh-memory decode: missing parent revision ${memoryId}@${parentRevision}`)
       const parentCreatedAt = normalizeNow(readNumber(parentRow, 'created_at'))
@@ -2086,7 +2182,9 @@ export class MemoryStore {
     if (revision === 1 && kind === 'working' && (expiresAt === undefined || expiresAt <= createdAt)) {
       throw new Error(`dsh-memory decode: first working revision must expire after creation ${memoryId}`)
     }
-    const allEvidence = this.readEvidence(memoryId, revision)
+    const allEvidence = context === undefined
+      ? this.readEvidence(memoryId, revision)
+      : this.decodeEvidenceRows(context.evidenceRows, memoryId, revision)
     if (allEvidence.length === 0 || allEvidence.length > 50) {
       throw new Error(`dsh-memory decode: revision ${memoryId}@${revision} must contain 1 to 50 evidence references`)
     }
@@ -2290,6 +2388,10 @@ export class MemoryStore {
       memoryId,
       revision,
     )
+    return this.decodeEvidenceRows(rows, memoryId, revision)
+  }
+
+  private decodeEvidenceRows(rows: readonly SqlRow[], memoryId: string, revision: number): EvidenceReference[] {
     if (rows.length > 50) {
       throw new Error(`dsh-memory decode: too many evidence references for ${memoryId}@${revision}`)
     }
@@ -2658,6 +2760,33 @@ function decodeConflictRow(row: SqlRow): MemoryConflict {
     ...(resolvedAt === undefined ? {} : { resolvedAt }),
     ...(resolver === undefined ? {} : { resolver }),
   })
+}
+
+function indexUniqueRows(
+  rows: readonly SqlRow[],
+  keyOf: (row: SqlRow) => string,
+  label: string,
+): Map<string, SqlRow> {
+  const indexed = new Map<string, SqlRow>()
+  for (const row of rows) {
+    const key = keyOf(row)
+    if (indexed.has(key)) throw new Error(`dsh-memory decode: duplicate ${label} row ${key}`)
+    indexed.set(key, row)
+  }
+  return indexed
+}
+
+function groupEvidenceRows(rows: readonly SqlRow[]): Map<string, SqlRow[]> {
+  const grouped = new Map<string, SqlRow[]>()
+  for (const row of rows) {
+    const memoryId = readString(row, 'memory_id')
+    const revision = assertPositiveInteger(readNumber(row, 'revision'), 'evidence.revision')
+    const key = revisionKey(memoryId, revision)
+    const group = grouped.get(key) ?? []
+    group.push(row)
+    grouped.set(key, group)
+  }
+  return grouped
 }
 
 function asSqlRow(value: unknown): SqlRow {

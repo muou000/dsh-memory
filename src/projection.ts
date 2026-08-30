@@ -42,6 +42,15 @@ export interface ProjectionVerification {
   readonly errors: readonly string[]
 }
 
+/** Content-addressed publication work performed for one projection generation. */
+export interface ProjectionPublication {
+  readonly mode: 'full' | 'incremental'
+  readonly writtenFiles: number
+  readonly reusedFiles: number
+  readonly removedFiles: number
+  readonly totalFiles: number
+}
+
 /** Rebuildable Markdown view for humans. Canonical state always remains in SQLite. */
 export class MarkdownProjection {
   readonly path: string
@@ -50,8 +59,8 @@ export class MarkdownProjection {
     this.path = config.projectionPath
   }
 
-  rebuild(store: MemoryStore, nowInput?: number): void {
-    if (!this.config.markdownProjection || this.config.readOnly) return
+  rebuild(store: MemoryStore, nowInput?: number): ProjectionPublication {
+    if (!this.config.markdownProjection || this.config.readOnly) return emptyPublication('full')
     ensureDirectory(this.path)
     ensureDirectory(join(this.path, 'records'))
     ensureDirectory(join(this.path, 'review'))
@@ -61,7 +70,7 @@ export class MarkdownProjection {
     const conflicts = store.listConflicts('open')
     const allConflicts = [...conflicts, ...store.listConflicts('resolved')]
     const now = nowInput ?? Date.now()
-    const maintenance = store.maintenance({ now })
+    const maintenance = store.maintenance({ now }, records.filter(record => record.status === 'active'))
     const revisions = new Map<string, MemoryRevision[]>()
     for (const revision of store.listRevisions()) {
       const group = revisions.get(revision.memoryId) ?? []
@@ -93,28 +102,118 @@ export class MarkdownProjection {
     generated.set('review/expiring.md', renderMaintenance(maintenance))
 
     const old = readManifest(this.path)
+    let writtenGeneratedFiles = 0
     for (const [relative, content] of generated) {
-      atomicWrite(join(this.path, relative), content)
+      if (atomicWriteIfChanged(join(this.path, relative), content)) writtenGeneratedFiles += 1
     }
     // The manifest is normally the ownership record. If it was lost or
     // corrupted, recover ownership from the two plugin-managed subdirectories
     // as well; otherwise a purged record page could survive indefinitely.
     const oldFiles = new Set([...old.files, ...managedProjectionFiles(this.path)])
     const stale = [...oldFiles].filter(relative => !generated.has(relative)).sort()
+    let tombstonesWritten = 0
     for (const relative of stale) {
-      atomicWrite(join(this.path, relative), '# Removed knowledge projection\n\nThis generated page is no longer present in the canonical view.\n')
+      if (atomicWriteIfChanged(join(this.path, relative), removedProjectionContent())) tombstonesWritten += 1
     }
     const manifest = createManifest(generated)
 
     // The manifest is the generation commit marker. A crash before this write
     // leaves the previous generation detectable instead of blessing mixed files.
-    atomicWrite(join(this.path, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`)
+    atomicWriteIfChanged(join(this.path, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`)
     for (const relative of stale) removeGeneratedFile(this.path, relative)
 
-    const verification = this.verify()
-    if (!verification.valid) {
-      throw new Error(`dsh-memory projection verification failed: ${verification.errors.join('; ')}`)
+    const errors = verifyIncrementalPublication(this.path, manifest, new Set(), new Set(stale))
+    if (errors.length > 0) {
+      throw new Error(`dsh-memory projection verification failed: ${errors.join('; ')}`)
     }
+    return Object.freeze({
+      mode: 'full',
+      writtenFiles: writtenGeneratedFiles + tombstonesWritten,
+      reusedFiles: generated.size - writtenGeneratedFiles,
+      removedFiles: stale.length,
+      totalFiles: generated.size,
+    })
+  }
+
+  /**
+   * Publish known canonical record changes without rewriting every record page.
+   * An invalid prior generation falls back to a fully verified rebuild.
+   */
+  refresh(store: MemoryStore, recordIdsInput: readonly string[], nowInput?: number): ProjectionPublication {
+    if (!this.config.markdownProjection || this.config.readOnly) return emptyPublication('incremental')
+    if (!Array.isArray(recordIdsInput) || recordIdsInput.some(id => typeof id !== 'string' || id.length === 0)) {
+      throw new Error('dsh-memory projection recordIds must be a list of non-empty strings')
+    }
+    ensureDirectory(this.path)
+    ensureDirectory(join(this.path, 'records'))
+    ensureDirectory(join(this.path, 'review'))
+
+    const old = readManifest(this.path)
+    if (projectionBaseErrors(this.path, old).length > 0 || old.manifest === undefined) {
+      return this.rebuild(store, nowInput)
+    }
+
+    const recordIds = [...new Set(recordIdsInput)]
+    const records = store.listRecords(['active', 'conflicted', 'stale', 'archived'])
+    const recordsById = new Map(records.map(record => [record.memoryId, record]))
+    const candidates = store.listCandidates('candidate')
+    const conflicts = store.listConflicts('open')
+    const allConflicts = [...conflicts, ...store.listConflicts('resolved')]
+    const now = nowInput ?? Date.now()
+    const maintenance = store.maintenance({ now }, records.filter(record => record.status === 'active'))
+    const generated = new Map<string, string>([
+      ['README.md', renderIndex(records, candidates, conflicts, maintenance, now)],
+      ['review/candidates.md', renderCandidates(candidates)],
+      ['review/conflicts.md', renderConflicts(conflicts, records)],
+      ['review/expiring.md', renderMaintenance(maintenance)],
+    ])
+    const removed = new Set<string>()
+    for (const memoryId of recordIds) {
+      const relative = `records/${safeFileName(memoryId)}.md`
+      const record = recordsById.get(memoryId)
+      if (record === undefined) {
+        removed.add(relative)
+        continue
+      }
+      generated.set(relative, renderRecord(
+        record,
+        store.listRevisions(memoryId),
+        allConflicts.filter(conflict => conflict.leftMemoryId === memoryId || conflict.rightMemoryId === memoryId),
+        now,
+      ))
+    }
+
+    const nextFiles: Record<string, string> = { ...old.manifest.files }
+    const checked = new Set<string>()
+    let writtenGeneratedFiles = 0
+    for (const [relative, content] of generated) {
+      if (atomicWriteIfChanged(join(this.path, relative), content)) writtenGeneratedFiles += 1
+      nextFiles[relative] = contentHash(content)
+      checked.add(relative)
+    }
+    let tombstonesWritten = 0
+    let removedFiles = 0
+    for (const relative of removed) {
+      if (!(relative in nextFiles) && !pathExists(join(this.path, relative))) continue
+      removedFiles += 1
+      if (atomicWriteIfChanged(join(this.path, relative), removedProjectionContent())) tombstonesWritten += 1
+      delete nextFiles[relative]
+    }
+    const manifest = createManifestFromHashes(nextFiles)
+    atomicWriteIfChanged(join(this.path, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`)
+    for (const relative of removed) removeGeneratedFile(this.path, relative)
+
+    const errors = verifyIncrementalPublication(this.path, manifest, checked, removed)
+    if (errors.length > 0) {
+      throw new Error(`dsh-memory projection verification failed: ${errors.join('; ')}`)
+    }
+    return Object.freeze({
+      mode: 'incremental',
+      writtenFiles: writtenGeneratedFiles + tombstonesWritten,
+      reusedFiles: Object.keys(nextFiles).length - writtenGeneratedFiles,
+      removedFiles,
+      totalFiles: Object.keys(nextFiles).length,
+    })
   }
 
   verify(): ProjectionVerification {
@@ -394,6 +493,88 @@ function renderConflicts(conflicts: readonly MemoryConflict[], records: readonly
   return `${lines.join('\n').trimEnd()}\n`
 }
 
+function emptyPublication(mode: ProjectionPublication['mode']): ProjectionPublication {
+  return Object.freeze({ mode, writtenFiles: 0, reusedFiles: 0, removedFiles: 0, totalFiles: 0 })
+}
+
+function removedProjectionContent(): string {
+  return '# Removed knowledge projection\n\nThis generated page is no longer present in the canonical view.\n'
+}
+
+function atomicWriteIfChanged(path: string, content: string): boolean {
+  const nextHash = contentHash(content)
+  if (regularFileContentHash(path) === nextHash) return false
+  atomicWrite(path, content)
+  if (regularFileContentHash(path) !== nextHash) {
+    throw new Error(`dsh-memory projection publication hash mismatch: ${path}`)
+  }
+  return true
+}
+
+function regularFileContentHash(path: string): string | undefined {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isFile()) return undefined
+    return contentHash(readFileSync(path))
+  } catch (error) {
+    if (isMissingFileError(error)) return undefined
+    throw error
+  }
+}
+
+function projectionBaseErrors(root: string, loaded: ReturnType<typeof readManifest>): string[] {
+  const errors = [...validateProjectionLayout(root), ...loaded.errors]
+  if (loaded.manifest === undefined) return errors
+  if (loaded.manifest.generation !== generationHash(loaded.manifest.files)) {
+    errors.push('manifest generation hash mismatch')
+  }
+  const managed = new Set(managedProjectionFiles(root))
+  for (const relative of managed) {
+    if (!(relative in loaded.manifest.files)) errors.push(`unexpected generated projection file: ${relative}`)
+  }
+  for (const relative of Object.keys(loaded.manifest.files)) {
+    if (!managed.has(relative)) errors.push(`projection file missing: ${relative}`)
+  }
+  return errors
+}
+
+function verifyIncrementalPublication(
+  root: string,
+  expected: ProjectionManifest,
+  checked: ReadonlySet<string>,
+  removed: ReadonlySet<string>,
+): string[] {
+  const loaded = readManifest(root)
+  const errors = projectionBaseErrors(root, loaded)
+  if (loaded.manifest?.generation !== expected.generation) {
+    errors.push('published manifest generation mismatch')
+  }
+  for (const relative of checked) {
+    const expectedHash = expected.files[relative]
+    if (expectedHash === undefined) {
+      errors.push(`published manifest entry missing: ${relative}`)
+      continue
+    }
+    const path = join(root, relative)
+    try {
+      const stat = lstatSync(path)
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        errors.push(`projection entry is not a regular file: ${relative}`)
+        continue
+      }
+      if (contentHash(readFileSync(path)) !== expectedHash) {
+        errors.push(`projection content hash mismatch: ${relative}`)
+      }
+    } catch {
+      errors.push(`projection file missing: ${relative}`)
+    }
+  }
+  for (const relative of removed) {
+    if (pathExists(join(root, relative))) errors.push(`removed projection file still exists: ${relative}`)
+  }
+  return errors
+}
+
 function atomicWrite(path: string, content: string): void {
   const parent = dirname(path)
   ensureDirectory(parent)
@@ -450,11 +631,18 @@ function createManifest(generated: ReadonlyMap<string, string>): ProjectionManif
   const files = Object.fromEntries(
     [...generated].sort(([left], [right]) => left.localeCompare(right)).map(([path, content]) => [path, contentHash(content)]),
   )
+  return createManifestFromHashes(files)
+}
+
+function createManifestFromHashes(input: Readonly<Record<string, string>>): ProjectionManifest {
+  const files = Object.freeze(Object.fromEntries(
+    Object.entries(input).sort(([left], [right]) => left.localeCompare(right)),
+  ))
   return Object.freeze({
     format: MANIFEST_FORMAT,
     version: MANIFEST_VERSION,
     generation: generationHash(files),
-    files: Object.freeze(files),
+    files,
   })
 }
 

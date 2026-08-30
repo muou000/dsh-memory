@@ -8,8 +8,14 @@ scope boundary and deterministic ranking; it is not evidence of downstream
 agent task success or a substitute for the held-out paired model evaluation.
 
 `benchmark.mjs` constructs a 10,000-record reference store and measures warm
-lexical search plus budgeted rendering. Set `DSH_MEMORY_BENCHMARK_COUNT` only
-for a larger reference run.
+lexical search, budgeted rendering, first Markdown generation, content-addressed
+warm rebuild, and one-record incremental publication. Set
+`DSH_MEMORY_BENCHMARK_COUNT` only for a larger reference run.
+
+`run-current-dsh-smoke.mjs --dsh-root <clean-checkout>` imports the neighboring
+DSH build, composes the real public Agent, Tools, SystemPrompt, and Cordis
+services with this plugin, exercises publication and incremental projection,
+then verifies unload closes the store. It never writes to the DSH checkout.
 
 `operator-rehearsal.mjs` drives the built administrative CLI through candidate
 inspection and approval, health checks, SQLite backup/restore, portable

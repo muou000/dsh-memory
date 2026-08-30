@@ -84,6 +84,12 @@ Projection failures do not roll back canonical writes. The service reports
 subsequent `rebuild` regenerates all Markdown pages. Each page is atomically
 replaced and the generation manifest is committed last with SHA-256 hashes;
 `projection-status` detects a partial generation, missing page, or manual edit.
+Normal mutations use a bounded incremental publication only after a verified
+generation exists. Missing/corrupt manifests, unexpected managed files,
+restore/import, and explicit repair fall back to a full canonical rebuild.
+`metrics` exposes process-local full rebuild, incremental update, files-written,
+and failure counters. Initial generation remains proportional to the total
+record/page count; provision maintenance windows for large first builds.
 
 ## Rollback and uninstall
 

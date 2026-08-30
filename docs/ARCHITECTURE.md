@@ -112,10 +112,15 @@ integrity checks protect canonical state. One process owns one writer handle;
 additional instances fail or enter explicitly configured read-only mode.
 
 Markdown pages are written through private temporary files and atomic rename.
-A SHA-256 manifest is the generation commit marker. Removed canonical pages are
-first replaced with content-free tombstones, so a failed unlink cannot retain
-deleted knowledge. The provider owns the database through a Cordis effect;
-unload removes listeners/tools/service and closes the writer handle.
+A SHA-256 manifest is the generation commit marker. Full rebuilds read canonical
+records and revisions in bounded batches and reuse byte-identical generated
+files. After a verified generation is ready, known canonical mutations publish
+the affected record pages plus deterministic global pages; an invalid manifest
+or layout falls back to a full rebuild. Removed canonical pages are first
+replaced with content-free tombstones, so a failed unlink cannot retain deleted
+knowledge. The explicit verifier still re-hashes every managed file. The
+provider owns the database through a Cordis effect; unload removes
+listeners/tools/service and closes the writer handle.
 
 Expiry, impending expiry, negative feedback, and inactivity produce a
 deterministic human review queue; they do not mutate records. Reviewed candidate

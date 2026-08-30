@@ -367,4 +367,10 @@ export interface MemoryMetrics {
   /** Reserved operational signal; this plugin schedules no background tasks. */
   readonly backgroundTaskFailures: number
   readonly projectionFailures?: number
+  /** Process-local count of fully verified projection rebuilds. */
+  readonly projectionFullRebuilds?: number
+  /** Process-local count of bounded incremental projection publications. */
+  readonly projectionIncrementalUpdates?: number
+  /** Process-local generated files written, excluding generation manifests. */
+  readonly projectionFilesWritten?: number
 }
