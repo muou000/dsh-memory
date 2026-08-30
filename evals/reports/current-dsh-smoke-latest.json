@@ -1,0 +1,19 @@
+{
+  "format": "dsh-memory-current-dsh-smoke",
+  "version": 1,
+  "pluginRevision": "40cfa48f3660b0656e59cb4d771fe45616549e0c",
+  "pluginDirty": false,
+  "dshRevision": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
+  "dshDirty": false,
+  "dshAgentVersion": "0.1.2-alpha.1",
+  "node": "v26.8.1",
+  "checks": {
+    "serviceLoaded": true,
+    "toolsRegistered": true,
+    "publicationRoundTrip": true,
+    "incrementalProjection": true,
+    "projectionValid": true,
+    "storeClosedOnDispose": true
+  },
+  "pass": true
+}
