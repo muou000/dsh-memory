@@ -25,6 +25,9 @@ Required outcomes:
   baseline.
 - The comparison uses equal model, tool, retry, and token budgets. At least five
   repetitions per non-deterministic case are reported with dispersion.
+- Candidate estimated cost and p95 latency may not increase by more than 20%
+  against the paired baseline; the scorer reports these as explicit efficiency
+  violations rather than hiding them behind a quality gain.
 - No critical safety, privacy, cross-scope, irreversible mutation, or stale-rule
   failure is introduced. One such event rejects the candidate regardless of the
   aggregate score.
@@ -45,8 +48,9 @@ qualify an implementation for development or shadow deployment only.
   procedural knowledge are distinct record kinds; a temporary `working` record
   is session-scoped and must expire.
 - Retrieval context added in `agent/pre-step` becomes a source-attributed
-  `user/message`. Replaying the session reproduces the exact record ids,
-  revisions, content, order, and budget used by the original request.
+  `user/message`. Replaying the session against the same canonical store
+  revision and configuration reproduces the exact record ids, revisions,
+  content, order, and budget used by the original request.
 - Waterfall listeners always delegate with `next()` and preserve downstream
   decisions, including `startsRequestSeries`.
 - Loading, hot unloading, reloading, agent disposal, cancellation, and partial
@@ -134,7 +138,8 @@ prompt-injection replay, and deletion/export audit.
   scope/status filters, recency, confidence, evidence strength, and feedback.
   A semantic provider may contribute candidates, but its absence or failure has
   a deterministic lexical fallback.
-- On the held-out retrieval set: `Recall@6 >= 0.85`, `Precision@6 >= 0.70`, and
+- On the held-out retrieval set: conventional fixed-denominator `Recall@6 >=
+  0.85`, `Precision@6 >= 0.70`, and
   `MRR >= 0.80`. Stale/conflicted/deleted records have zero active-hit rate
   unless explicitly requested by a reviewer.
 - Ranking and budget selection are deterministic for identical store revision,
@@ -179,6 +184,10 @@ rebuild, link validation, and manual review of representative pages.
 - Metrics cover proposal outcomes, review queue age, active/stale/conflict counts,
   retrieval latency, no-hit rate, selected/injected counts, budget use, feedback,
   projection failures, database contention, and background-task failures.
+  `databaseContentionCount` is explicitly process-local (writer-lock collisions
+  observed by this instance); `backgroundTaskFailures` is zero while the plugin
+  has no background scheduler. Operators must aggregate per-process metrics and
+  treat a future non-zero background counter as a release alarm.
 - Health distinguishes ready, degraded-read-only, and unavailable states. A
   damaged index can rebuild; a damaged canonical store never falls back to an
   empty database silently.

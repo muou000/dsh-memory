@@ -1,7 +1,11 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { restoreDatabaseBackup } from '../src/backup.ts'
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { dirname, join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { createDatabaseBackup, restoreDatabaseBackup } from '../src/backup.ts'
+import { CREATE_SCHEMA_SQL } from '../src/schema.ts'
 import { MemoryStore } from '../src/store.ts'
 import type { TemporaryMemoryHome } from './helpers.ts'
 import { draft, proposer, reviewer, temporaryMemoryHome } from './helpers.ts'
@@ -50,6 +54,45 @@ describe('SQLite backup and restore', () => {
     expect(readFileSync(target, 'utf8')).toBe('keep me')
   })
 
+  it('rejects an active backup lock and only reclaims a lock from an exited process', async () => {
+    const home = temporaryMemoryHome({ markdownProjection: false })
+    homes.push(home)
+    const source = new MemoryStore(home.config)
+    stores.push(source)
+    const backupPath = join(home.root, 'locked', 'memory.sqlite')
+    const lockPath = `${backupPath}.dsh-memory-operation.lock`
+
+    mkdirForBackup(backupPath)
+    writeFileSync(lockPath, `${process.pid}:active`, 'utf8')
+    await expect(createDatabaseBackup(source.database, backupPath)).rejects.toThrow('another operation')
+    expect(existsSync(lockPath)).toBe(true)
+    unlinkSync(lockPath)
+
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' })
+    const childPid = child.pid
+    if (childPid === undefined) throw new Error('lock fixture process did not expose a PID')
+    await once(child, 'exit')
+    writeFileSync(lockPath, `${childPid}:exited`, 'utf8')
+    expect(await createDatabaseBackup(source.database, backupPath)).toBeGreaterThan(0)
+    expect(existsSync(lockPath)).toBe(false)
+  })
+
+  it('restores a valid older-schema backup for migration on first writable open', async () => {
+    const home = temporaryMemoryHome()
+    homes.push(home)
+    const legacyPath = join(home.root, 'legacy-v1.sqlite')
+    const restoredPath = join(home.root, 'restored-v1.sqlite')
+    const legacy = new DatabaseSync(legacyPath)
+    legacy.exec(CREATE_SCHEMA_SQL)
+    legacy.exec('DROP TABLE memory_meta; ALTER TABLE memory_candidates DROP COLUMN similar_memory_ids_json; PRAGMA user_version = 1')
+    legacy.close()
+
+    expect(await restoreDatabaseBackup(legacyPath, restoredPath)).toBeGreaterThan(0)
+    const migrated = new MemoryStore({ ...home.config, storagePath: restoredPath })
+    stores.push(migrated)
+    expect((migrated.database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+  })
+
   it('restores a validated portable export only into an empty store', () => {
     const sourceHome = temporaryMemoryHome()
     const targetHome = temporaryMemoryHome()
@@ -62,7 +105,10 @@ describe('SQLite backup and restore', () => {
     const target = new MemoryStore(targetHome.config)
     stores.push(target)
     target.restoreExport(exported)
-    expect(target.export(9_000)).toEqual(exported)
+    const restoredExport = target.export(9_000)
+    expect({ ...restoredExport, audit: exported.audit }).toEqual(exported)
+    expect(restoredExport.audit.slice(0, exported.audit.length)).toEqual(exported.audit)
+    expect(restoredExport.audit.at(-1)).toMatchObject({ action: 'restore.export' })
     expect(() => target.restoreExport(exported)).toThrow('destination store must be empty')
 
     const tampered: unknown = structuredClone(exported)
@@ -76,3 +122,7 @@ describe('SQLite backup and restore', () => {
     expect(empty.listRecords()).toHaveLength(0)
   })
 })
+
+function mkdirForBackup(path: string): void {
+  mkdirSync(dirname(path), { recursive: true })
+}

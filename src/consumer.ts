@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { UserMessage } from '@deepseek-ai/dsh-llm'
-import { randomUUID } from 'node:crypto'
+import { createHash } from 'node:crypto'
 import type { ResolvedConfig } from './config.ts'
 import { renderMemoryContext } from './render.ts'
 import type { MemoryAccessContext } from './types.ts'
@@ -32,21 +32,19 @@ export function registerMemoryConsumer(ctx: Context, config: ResolvedConfig): ()
       )
       return decision
     }
-    const rendered = renderMemoryContext(result.hits, config)
-    if (rendered.text.length === 0) return decision
-
-    const contextMessage = createUserMessage({
-      content: [{ type: 'text' as const, text: rendered.text }],
-      source: { kind: 'plugin' as const, plugin: 'dsh-memory', form: 'recall' as const },
-    })
+    // The pre-step callback can be replayed after a restart. Derive the batch
+    // id from stable session inputs so accounting and the model-visible header
+    // identify the same retrieval event on a replay.
+    const retrievalId = automaticRetrievalId(payload.agent, payload.turn, result.queryHash)
+    const rendered = renderMemoryContext(result.hits, config, retrievalId)
     if (ctx.memories.writable) {
       try {
         ctx.memories.recordRetrieval({
-          id: randomUUID(),
+          id: retrievalId,
           queryHash: result.queryHash,
           ...(config.logQueryText ? { queryText: query } : {}),
           context: access,
-          candidateCount: result.hits.length,
+          candidateCount: result.candidateCount,
           selected: rendered.selected.map(hit => ({
             memoryId: hit.record.memoryId,
             revision: hit.record.revision,
@@ -67,6 +65,12 @@ export function registerMemoryConsumer(ctx: Context, config: ResolvedConfig): ()
         )
       }
     }
+    if (rendered.text.length === 0) return decision
+
+    const contextMessage = createUserMessage({
+      content: [{ type: 'text' as const, text: rendered.text }],
+      source: { kind: 'plugin' as const, plugin: 'dsh-memory', form: 'recall' as const },
+    })
     return { ...decision, messages: [contextMessage, ...decision.messages] }
   })
 }
@@ -93,4 +97,15 @@ function taskText(messages: readonly UserMessage[]): string {
     }
   }
   return parts.join('\n').trim().slice(0, 20_000)
+}
+
+function automaticRetrievalId(
+  agent: { readonly id: string; readonly session: { readonly header: { readonly cwd?: string } } },
+  turn: number,
+  queryHashValue: string,
+): string {
+  const digest = createHash('sha256')
+    .update(`${String(agent.id)}\u0000${String(agent.session.header.cwd ?? '')}\u0000${turn}\u0000${queryHashValue}`, 'utf8')
+    .digest('hex')
+  return `auto-${digest}`
 }

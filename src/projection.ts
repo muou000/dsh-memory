@@ -1,11 +1,13 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
+  chmodSync,
   closeSync,
   existsSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -14,9 +16,31 @@ import {
 import { basename, dirname, join } from 'node:path'
 import type { ResolvedConfig } from './config.ts'
 import type { MemoryStore } from './store.ts'
-import type { MemoryCandidate, MemoryConflict, MemoryRecord, MemoryRevision } from './types.ts'
+import type {
+  MemoryCandidate,
+  MemoryConflict,
+  MemoryMaintenanceResult,
+  MemoryRecord,
+  MemoryRevision,
+} from './types.ts'
 
 const MANIFEST = '.dsh-memory-manifest.json'
+const MANIFEST_FORMAT = 'dsh-memory-markdown-projection'
+const MANIFEST_VERSION = 2
+
+interface ProjectionManifest {
+  readonly format: typeof MANIFEST_FORMAT
+  readonly version: typeof MANIFEST_VERSION
+  readonly generation: string
+  readonly files: Readonly<Record<string, string>>
+}
+
+export interface ProjectionVerification {
+  readonly valid: boolean
+  readonly generation?: string
+  readonly fileCount: number
+  readonly errors: readonly string[]
+}
 
 /** Rebuildable Markdown view for humans. Canonical state always remains in SQLite. */
 export class MarkdownProjection {
@@ -26,37 +50,108 @@ export class MarkdownProjection {
     this.path = config.projectionPath
   }
 
-  rebuild(store: MemoryStore): void {
+  rebuild(store: MemoryStore, nowInput?: number): void {
     if (!this.config.markdownProjection || this.config.readOnly) return
-    mkdirSync(this.path, { recursive: true, mode: 0o700 })
-    mkdirSync(join(this.path, 'records'), { recursive: true, mode: 0o700 })
-    mkdirSync(join(this.path, 'review'), { recursive: true, mode: 0o700 })
+    ensureDirectory(this.path)
+    ensureDirectory(join(this.path, 'records'))
+    ensureDirectory(join(this.path, 'review'))
 
     const records = store.listRecords(['active', 'conflicted', 'stale', 'archived'])
     const candidates = store.listCandidates('candidate')
     const conflicts = store.listConflicts('open')
-    const revisions = new Map<string, readonly MemoryRevision[]>()
-    for (const record of records) revisions.set(record.memoryId, store.listRevisions(record.memoryId))
+    const allConflicts = [...conflicts, ...store.listConflicts('resolved')]
+    const now = nowInput ?? Date.now()
+    const maintenance = store.maintenance({ now })
+    const revisions = new Map<string, MemoryRevision[]>()
+    for (const revision of store.listRevisions()) {
+      const group = revisions.get(revision.memoryId) ?? []
+      group.push(revision)
+      revisions.set(revision.memoryId, group)
+    }
+    const conflictsByMemory = new Map<string, MemoryConflict[]>()
+    for (const conflict of allConflicts) {
+      for (const memoryId of new Set([conflict.leftMemoryId, conflict.rightMemoryId])) {
+        const group = conflictsByMemory.get(memoryId) ?? []
+        group.push(conflict)
+        conflictsByMemory.set(memoryId, group)
+      }
+    }
 
-    const generated = new Set<string>()
+    const generated = new Map<string, string>()
     for (const record of records) {
       const relative = `records/${safeFileName(record.memoryId)}.md`
-      atomicWrite(join(this.path, relative), renderRecord(record, revisions.get(record.memoryId) ?? []))
-      generated.add(relative)
+      generated.set(relative, renderRecord(
+        record,
+        revisions.get(record.memoryId) ?? [],
+        conflictsByMemory.get(record.memoryId) ?? [],
+        now,
+      ))
     }
-    atomicWrite(join(this.path, 'README.md'), renderIndex(records, candidates, conflicts))
-    generated.add('README.md')
-    atomicWrite(join(this.path, 'review', 'candidates.md'), renderCandidates(candidates))
-    generated.add('review/candidates.md')
-    atomicWrite(join(this.path, 'review', 'conflicts.md'), renderConflicts(conflicts, records))
-    generated.add('review/conflicts.md')
+    generated.set('README.md', renderIndex(records, candidates, conflicts, maintenance, now))
+    generated.set('review/candidates.md', renderCandidates(candidates))
+    generated.set('review/conflicts.md', renderConflicts(conflicts, records))
+    generated.set('review/expiring.md', renderMaintenance(maintenance))
 
     const old = readManifest(this.path)
-    for (const relative of old) {
-      if (generated.has(relative)) continue
-      removeGeneratedFile(this.path, relative)
+    for (const [relative, content] of generated) {
+      atomicWrite(join(this.path, relative), content)
     }
-    atomicWrite(join(this.path, MANIFEST), `${JSON.stringify([...generated].sort(), null, 2)}\n`)
+    // The manifest is normally the ownership record. If it was lost or
+    // corrupted, recover ownership from the two plugin-managed subdirectories
+    // as well; otherwise a purged record page could survive indefinitely.
+    const oldFiles = new Set([...old.files, ...managedProjectionFiles(this.path)])
+    const stale = [...oldFiles].filter(relative => !generated.has(relative)).sort()
+    for (const relative of stale) {
+      atomicWrite(join(this.path, relative), '# Removed knowledge projection\n\nThis generated page is no longer present in the canonical view.\n')
+    }
+    const manifest = createManifest(generated)
+
+    // The manifest is the generation commit marker. A crash before this write
+    // leaves the previous generation detectable instead of blessing mixed files.
+    atomicWrite(join(this.path, MANIFEST), `${JSON.stringify(manifest, null, 2)}\n`)
+    for (const relative of stale) removeGeneratedFile(this.path, relative)
+
+    const verification = this.verify()
+    if (!verification.valid) {
+      throw new Error(`dsh-memory projection verification failed: ${verification.errors.join('; ')}`)
+    }
+  }
+
+  verify(): ProjectionVerification {
+    const loaded = readManifest(this.path)
+    const errors = [...validateProjectionLayout(this.path), ...loaded.errors]
+    if (loaded.manifest !== undefined) {
+      const expectedGeneration = generationHash(loaded.manifest.files)
+      if (loaded.manifest.generation !== expectedGeneration) errors.push('manifest generation hash mismatch')
+      const managed = new Set(managedProjectionFiles(this.path))
+      for (const relative of managed) {
+        if (!(relative in loaded.manifest.files)) errors.push(`unexpected generated projection file: ${relative}`)
+      }
+      for (const [relative, expectedHash] of Object.entries(loaded.manifest.files)) {
+        if (!isSafeRelative(relative)) {
+          errors.push(`unsafe manifest path: ${relative}`)
+          continue
+        }
+        const path = join(this.path, relative)
+        try {
+          const stat = lstatSync(path)
+          if (stat.isSymbolicLink() || !stat.isFile()) {
+            errors.push(`projection entry is not a regular file: ${relative}`)
+            continue
+          }
+          const actualHash = contentHash(readFileSync(path))
+          if (actualHash !== expectedHash) errors.push(`projection content hash mismatch: ${relative}`)
+        } catch {
+          errors.push(`projection file missing: ${relative}`)
+        }
+      }
+    }
+    return Object.freeze({
+      valid: errors.length === 0 && loaded.manifest !== undefined,
+      ...(loaded.manifest === undefined ? {} : { generation: loaded.manifest.generation }),
+      fileCount: loaded.files.length,
+      errors: Object.freeze(errors),
+    })
   }
 }
 
@@ -64,14 +159,9 @@ function renderIndex(
   records: readonly MemoryRecord[],
   candidates: readonly MemoryCandidate[],
   conflicts: readonly MemoryConflict[],
+  maintenance: MemoryMaintenanceResult,
+  now: number,
 ): string {
-  const grouped = new Map<string, MemoryRecord[]>()
-  for (const record of records) {
-    const key = `${record.scope.type}:${record.scope.key}`
-    const group = grouped.get(key) ?? []
-    group.push(record)
-    grouped.set(key, group)
-  }
   const lines = [
     '# Team knowledge',
     '',
@@ -83,19 +173,75 @@ function renderIndex(
     `- Conflicted records: ${records.filter(record => record.status === 'conflicted').length}`,
     `- Review candidates: [${candidates.length}](review/candidates.md)`,
     `- Open conflicts: [${conflicts.length}](review/conflicts.md)`,
+    `- Maintenance nominations: [${maintenance.nominations.length}](review/expiring.md)`,
+    `- Freshness as of: ${formatTime(now)}`,
     '',
   ]
-  for (const [scope, group] of [...grouped].sort(([left], [right]) => left.localeCompare(right))) {
-    lines.push(`## ${escapeInline(scope)}`, '')
-    for (const record of group.sort((left, right) => left.subject.localeCompare(right.subject))) {
-      lines.push(`- [${escapeInline(record.subject)}](records/${safeFileName(record.memoryId)}.md) · ${record.kind} · ${record.status} · r${record.revision}`)
-    }
+  appendRecordGroups(lines, 'By scope', records, record => `${record.scope.type}:${record.scope.key}`)
+  appendRecordGroups(lines, 'By kind', records, record => record.kind)
+  appendRecordGroups(lines, 'By status', records, record => record.status)
+  appendRecordGroups(lines, 'By owner', records, record => record.owner)
+  lines.push('## Freshness', '')
+  const freshnessGroups = new Map<string, MemoryRecord[]>()
+  for (const record of records) {
+    const key = freshnessLabel(record, now)
+    const group = freshnessGroups.get(key) ?? []
+    group.push(record)
+    freshnessGroups.set(key, group)
+  }
+  for (const [label, group] of [...freshnessGroups].sort(([left], [right]) => left.localeCompare(right))) {
+    lines.push(`### ${escapeInline(label)}`, '')
+    appendRecordLinks(lines, group)
     lines.push('')
   }
   return `${lines.join('\n').trimEnd()}\n`
 }
 
-function renderRecord(record: MemoryRecord, revisions: readonly MemoryRevision[]): string {
+function appendRecordGroups(
+  lines: string[],
+  heading: string,
+  records: readonly MemoryRecord[],
+  keyOf: (record: MemoryRecord) => string,
+): void {
+  lines.push(`## ${heading}`, '')
+  const grouped = new Map<string, MemoryRecord[]>()
+  for (const record of records) {
+    const key = keyOf(record)
+    const group = grouped.get(key) ?? []
+    group.push(record)
+    grouped.set(key, group)
+  }
+  for (const [key, group] of [...grouped].sort(([left], [right]) => left.localeCompare(right))) {
+    lines.push(`### ${escapeInline(key)}`, '')
+    appendRecordLinks(lines, group)
+    lines.push('')
+  }
+  if (grouped.size === 0) lines.push('No records.', '')
+}
+
+function appendRecordLinks(lines: string[], records: readonly MemoryRecord[]): void {
+  for (const record of [...records].sort((left, right) => left.subject.localeCompare(right.subject) || left.memoryId.localeCompare(right.memoryId))) {
+    lines.push(`- [${escapeInline(record.subject)}](records/${safeFileName(record.memoryId)}.md) · ${record.kind} · ${record.status} · r${record.revision}`)
+  }
+}
+
+function freshnessLabel(record: MemoryRecord, now: number): string {
+  if (record.expiresAt !== undefined) {
+    if (record.expiresAt <= now) return 'expired'
+    if (record.expiresAt <= now + 7 * 86_400_000) return 'expires-within-7-days'
+  }
+  const ageDays = Math.floor(Math.max(0, now - record.updatedAt) / 86_400_000)
+  if (ageDays === 0) return 'updated-today'
+  if (ageDays <= 30) return 'updated-within-30-days'
+  return 'older-than-30-days'
+}
+
+function renderRecord(
+  record: MemoryRecord,
+  revisions: readonly MemoryRevision[],
+  conflicts: readonly MemoryConflict[],
+  now: number,
+): string {
   const lines = [
     `# ${escapeInline(record.subject)}`,
     '',
@@ -114,6 +260,7 @@ function renderRecord(record: MemoryRecord, revisions: readonly MemoryRevision[]
     `- Created: ${formatTime(record.createdAt)}`,
     `- Updated: ${formatTime(record.updatedAt)}`,
     ...(record.expiresAt === undefined ? [] : [`- Expires: ${formatTime(record.expiresAt)}`]),
+    `- Freshness: ${freshnessLabel(record, now)}`,
     '',
     '## When',
     '',
@@ -134,6 +281,12 @@ function renderRecord(record: MemoryRecord, revisions: readonly MemoryRevision[]
   else for (const evidence of record.evidence) {
     lines.push(`- **${evidence.kind}** · \`${escapeCode(evidence.locator)}\`${evidence.note === undefined ? '' : ` · ${escapeInline(evidence.note)}`}`)
   }
+  lines.push('', '## Conflicts', '')
+  if (conflicts.length === 0) lines.push('- None.')
+  else for (const conflict of [...conflicts].sort((left, right) => left.id.localeCompare(right.id))) {
+    const otherId = conflict.leftMemoryId === record.memoryId ? conflict.rightMemoryId : conflict.leftMemoryId
+    lines.push(`- [${escapeCode(conflict.id)}](../review/conflicts.md) · ${conflict.status} · related memory \`${escapeCode(otherId)}\``)
+  }
   lines.push('', '## Usage', '',
     `- Injected/read count: ${record.useCount}`,
     `- Helpful feedback: ${record.positiveFeedback}`,
@@ -142,6 +295,37 @@ function renderRecord(record: MemoryRecord, revisions: readonly MemoryRevision[]
     '', '## Revision history', '')
   for (const revision of revisions) {
     lines.push(`- r${revision.revision} · ${revision.operation} · ${formatTime(revision.createdAt)} · ${escapeInline(revision.actor.kind)}:${escapeInline(revision.actor.id)} · \`${revision.contentHash.slice(0, 12)}\``)
+  }
+  return `${lines.join('\n').trimEnd()}\n`
+}
+
+function renderMaintenance(maintenance: MemoryMaintenanceResult): string {
+  const lines = [
+    '# Maintenance review queue',
+    '',
+    '> Generated by dsh-memory. Nominations never mutate records; use an approved review action.',
+    '',
+    `- Evaluated as of canonical activity: ${formatTime(maintenance.evaluatedAt)}`,
+    `- Scanned active records: ${maintenance.scanned}`,
+    `- Expired: ${maintenance.expiredCount}`,
+    `- Expiring: ${maintenance.expiringCount}`,
+    `- Negative feedback: ${maintenance.negativeFeedbackCount}`,
+    `- Unused: ${maintenance.unusedCount}`,
+    '',
+  ]
+  if (maintenance.nominations.length === 0) lines.push('No nominations.', '')
+  for (const nomination of maintenance.nominations) {
+    const record = nomination.record
+    lines.push(
+      `## [${escapeInline(record.subject)}](../records/${safeFileName(record.memoryId)}.md)`,
+      '',
+      `- Memory: \`${escapeCode(record.memoryId)}\` @ r${record.revision}`,
+      `- Priority: ${nomination.priority}`,
+      `- Reasons: ${nomination.reasons.join(', ')}`,
+      `- Negative feedback ratio: ${nomination.negativeFeedbackRatio.toFixed(2)}`,
+      ...(nomination.dueAt === undefined ? [] : [`- Due: ${formatTime(nomination.dueAt)}`]),
+      '',
+    )
   }
   return `${lines.join('\n').trimEnd()}\n`
 }
@@ -160,16 +344,28 @@ function renderCandidates(candidates: readonly MemoryCandidate[]): string {
       '',
       `- Candidate: \`${escapeCode(candidate.id)}\``,
       `- Operation: ${candidate.operation}`,
+      `- Status: ${candidate.status}`,
       `- Scope: ${escapeInline(candidate.content.scope.type)} · \`${escapeCode(candidate.content.scope.key)}\``,
       `- Kind: ${candidate.content.kind}`,
+      `- Sensitivity: ${candidate.content.sensitivity}`,
+      `- Confidence: ${candidate.content.confidence.toFixed(2)}`,
+      `- Owner: ${escapeInline(candidate.content.owner)}`,
       `- Proposed by: ${escapeInline(candidate.actor.kind)}:${escapeInline(candidate.actor.id)}`,
       `- Proposed: ${formatTime(candidate.createdAt)}`,
-      ...(candidate.targetMemoryId === undefined ? [] : [`- Target: \`${candidate.targetMemoryId}\` @ r${candidate.expectedRevision}`]),
+      ...(candidate.targetMemoryId === undefined ? [] : [`- Target: \`${escapeCode(candidate.targetMemoryId)}\` @ r${candidate.expectedRevision}`]),
+      ...(candidate.similarMemoryIds.length === 0 ? [] : [
+        `- Similar published memories: ${candidate.similarMemoryIds.map(id => `[\`${escapeCode(id)}\`](../records/${safeFileName(id)}.md)`).join(', ')}`,
+      ]),
       '',
       '**When**', '', htmlPre(candidate.content.applicability), '',
       '**What**', '', htmlPre(candidate.content.action), '',
       '**Why**', '', htmlPre(candidate.content.rationale), '',
+      '**Evidence**', '',
     )
+    for (const evidence of candidate.content.evidence) {
+      lines.push(`- **${evidence.kind}** · \`${escapeCode(evidence.locator)}\`${evidence.note === undefined ? '' : ` · ${escapeInline(evidence.note)}`}`)
+    }
+    lines.push('')
   }
   return `${lines.join('\n').trimEnd()}\n`
 }
@@ -200,37 +396,107 @@ function renderConflicts(conflicts: readonly MemoryConflict[], records: readonly
 
 function atomicWrite(path: string, content: string): void {
   const parent = dirname(path)
-  mkdirSync(parent, { recursive: true, mode: 0o700 })
+  ensureDirectory(parent)
   const temporary = join(parent, `.${basename(path)}.${randomUUID()}.tmp`)
-  const fd = openSync(temporary, 'wx', 0o600)
+  let fd: number | undefined
+  let committed = false
   try {
+    fd = openSync(temporary, 'wx', 0o600)
     writeFileSync(fd, content, { encoding: 'utf8' })
     fsyncSync(fd)
-  } finally {
     closeSync(fd)
-  }
-  try {
+    fd = undefined
     renameSync(temporary, path)
+    committed = true
   } catch (error) {
-    try {
-      unlinkSync(temporary)
-    } catch {
-      // Preserve the publication error.
+    if (fd !== undefined) {
+      try { closeSync(fd) } catch { /* preserve the publication error */ }
+    }
+    if (!committed) {
+      try { unlinkSync(temporary) } catch { /* preserve the publication error */ }
     }
     throw error
   }
 }
 
-function readManifest(root: string): readonly string[] {
-  const path = join(root, MANIFEST)
-  if (!existsSync(path)) return []
+function validateProjectionLayout(root: string): string[] {
+  const errors: string[] = []
+  let rootStat
   try {
-    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
-    if (!Array.isArray(value) || value.some(item => typeof item !== 'string' || !isSafeRelative(item))) return []
-    return value
-  } catch {
-    return []
+    rootStat = lstatSync(root)
+  } catch (error) {
+    if (!isMissingFileError(error)) errors.push(`projection root is unreadable: ${root}`)
+    return errors
   }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
+    errors.push('projection root is not a regular directory')
+    return errors
+  }
+  for (const relative of ['records', 'review']) {
+    const path = join(root, relative)
+    try {
+      const stat = lstatSync(path)
+      if (stat.isSymbolicLink() || !stat.isDirectory()) {
+        errors.push(`projection directory is not a regular directory: ${relative}`)
+      }
+    } catch (error) {
+      if (!isMissingFileError(error)) errors.push(`projection directory is unreadable: ${relative}`)
+    }
+  }
+  return errors
+}
+
+function createManifest(generated: ReadonlyMap<string, string>): ProjectionManifest {
+  const files = Object.fromEntries(
+    [...generated].sort(([left], [right]) => left.localeCompare(right)).map(([path, content]) => [path, contentHash(content)]),
+  )
+  return Object.freeze({
+    format: MANIFEST_FORMAT,
+    version: MANIFEST_VERSION,
+    generation: generationHash(files),
+    files: Object.freeze(files),
+  })
+}
+
+function generationHash(files: Readonly<Record<string, string>>): string {
+  return contentHash(JSON.stringify(Object.entries(files).sort(([left], [right]) => left.localeCompare(right))))
+}
+
+function contentHash(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function readManifest(root: string): {
+  readonly files: readonly string[]
+  readonly manifest?: ProjectionManifest
+  readonly errors: readonly string[]
+} {
+  const path = join(root, MANIFEST)
+  if (!existsSync(path)) return { files: [], errors: ['projection manifest missing'] }
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isFile()) return { files: [], errors: ['projection manifest is not a regular file'] }
+    const value: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    if (Array.isArray(value)) {
+      if (value.some(item => typeof item !== 'string' || !isSafeRelative(item))) {
+        return { files: [], errors: ['legacy projection manifest is invalid'] }
+      }
+      return { files: value, errors: ['legacy projection manifest has no content hashes'] }
+    }
+    if (!isProjectionManifest(value)) return { files: [], errors: ['projection manifest is invalid'] }
+    return { files: Object.keys(value.files), manifest: value, errors: [] }
+  } catch {
+    return { files: [], errors: ['projection manifest is unreadable'] }
+  }
+}
+
+function isProjectionManifest(value: unknown): value is ProjectionManifest {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const candidate = value as Record<string, unknown>
+  if (candidate.format !== MANIFEST_FORMAT || candidate.version !== MANIFEST_VERSION) return false
+  if (typeof candidate.generation !== 'string' || !/^[a-f0-9]{64}$/.test(candidate.generation)) return false
+  if (typeof candidate.files !== 'object' || candidate.files === null || Array.isArray(candidate.files)) return false
+  return Object.entries(candidate.files).every(([relative, hash]) => isSafeRelative(relative) && typeof hash === 'string' && /^[a-f0-9]{64}$/.test(hash))
 }
 
 function removeGeneratedFile(root: string, relative: string): void {
@@ -238,19 +504,89 @@ function removeGeneratedFile(root: string, relative: string): void {
   const path = join(root, relative)
   try {
     const stat = lstatSync(path)
-    if (stat.isSymbolicLink() || !stat.isFile()) return
+    // Unlinking a symlink removes the link itself and never follows its target.
+    // This lets cleanup remove a stale managed link without touching a file
+    // outside the projection root.
+    if (stat.isSymbolicLink()) {
+      unlinkSync(path)
+      return
+    }
+    if (!stat.isFile()) {
+      throw new Error(`dsh-memory projection cleanup refused non-file entry: ${relative}`)
+    }
     unlinkSync(path)
-  } catch {
-    // A missing derived page needs no recovery.
+  } catch (error) {
+    if (isMissingFileError(error)) return
+    throw error
   }
 }
 
+/** Enumerate only paths owned by the generated projection layout. */
+function managedProjectionFiles(root: string): string[] {
+  const files = new Set<string>()
+  for (const relative of ['README.md', 'review/candidates.md', 'review/conflicts.md', 'review/expiring.md']) {
+    if (pathExists(join(root, relative))) files.add(relative)
+  }
+  const recordsPath = join(root, 'records')
+  try {
+    const stat = lstatSync(recordsPath)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return [...files]
+    for (const entry of readdirSync(recordsPath, { withFileTypes: true })) {
+      const relative = `records/${entry.name}`
+      if ((entry.isFile() || entry.isSymbolicLink()) && isSafeRelative(relative)) files.add(relative)
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error
+  }
+  return [...files]
+}
+
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    if (isMissingFileError(error)) return false
+    throw error
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT'
+}
+
 function isSafeRelative(value: string): boolean {
-  return /^(?:README\.md|records\/[A-Za-z0-9._-]+\.md|review\/(?:candidates|conflicts)\.md)$/.test(value)
+  return /^(?:README\.md|records\/[A-Za-z0-9._-]+\.md|review\/(?:candidates|conflicts|expiring)\.md)$/.test(value)
+}
+
+function ensureDirectory(path: string): void {
+  try {
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`dsh-memory projection path is not a regular directory: ${path}`)
+    }
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error
+    mkdirSync(path, { recursive: true, mode: 0o700 })
+    const stat = lstatSync(path)
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`dsh-memory projection path is not a regular directory: ${path}`)
+    }
+  }
+  try {
+    chmodSync(path, 0o700)
+  } catch (error) {
+    if (process.platform !== 'win32') throw error
+  }
 }
 
 function safeFileName(value: string): string {
-  return value.replace(/[^A-Za-z0-9._-]/g, '_')
+  const sanitized = value.replace(/[^A-Za-z0-9._-]/g, '_')
+  // Imported identifiers are not required to be UUIDs. Bound the path length
+  // and retain a digest whenever normalization could collide.
+  if (sanitized === value && value.length <= 120) return value
+  const digest = createHash('sha256').update(value, 'utf8').digest('hex').slice(0, 12)
+  return `${sanitized.slice(0, 100)}-${digest}`
 }
 
 function htmlPre(value: string): string {
@@ -266,7 +602,13 @@ function escapeInline(value: string): string {
 }
 
 function escapeCode(value: string): string {
-  return value.replace(/`/g, '\\`').replace(/[\r\n]+/g, ' ')
+  // Backslashes do not escape delimiters inside Markdown code spans. Encode
+  // them as entities instead; parsing sees no new delimiter, while readers
+  // still get a faithful printable value.
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/`/g, '&#96;')
+    .replace(/[\r\n]+/g, ' ')
 }
 
 function formatTime(value: number): string {

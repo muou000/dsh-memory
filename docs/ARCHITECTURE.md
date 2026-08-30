@@ -14,7 +14,7 @@ Quality, isolation, latency, and safety are non-regression metrics.
 
 ## Capability seam
 
-This package initially ships four roles together because they share one public
+This package ships four roles together because they share one public
 contract and persistence format:
 
 - **Definition:** `ctx.memories` types and service operations.
@@ -23,7 +23,9 @@ contract and persistence format:
 - **Human view:** generated Markdown index and record pages.
 
 The contract admits a later remote provider or semantic candidate source without
-changing consumer behavior. The package does not modify the DSH agent loop.
+changing consumer behavior. No semantic provider ships in `0.1.0`; deterministic
+SQLite FTS is the fail-safe implementation. The package does not modify the DSH
+agent loop.
 
 ## Sources and projections
 
@@ -33,10 +35,10 @@ DSH session events / code / tests / human decisions
                          v
                    candidate record
                          |
-             review / exact dedup / conflict
+        review / exact dedup / near-duplicate hint / conflict
                          |
                          v
-       SQLite canonical record + immutable revisions + audit
+ SQLite canonical record + immutable revisions + telemetry + audit
                  |                         |
                  v                         v
        lexical retrieval index      Markdown human view
@@ -81,10 +83,10 @@ trusted service operations for human/admin consumers.
 
 ## Retrieval and injection
 
-The default provider combines exact match and SQLite FTS relevance, then applies
+The provider combines exact match and SQLite FTS relevance, then applies
 deterministic status, applicability, confidence, evidence, recency, and feedback
-weights. An optional semantic provider may add candidates, but a timeout or
-failure cannot remove lexical results or change isolation.
+weights. Near-duplicate hints use deterministic token overlap inside the exact
+scope and kind; they never merge records automatically.
 
 The consumer retrieves only on the first step of a turn containing direct task
 input. It calls `next()` first, preserves the downstream decision, and inserts a
@@ -92,17 +94,35 @@ separate plugin-sourced user message before the direct task. The rendering names
 record ids and revisions, labels content untrusted, and obeys item and token
 budgets. DSH records the admitted message, making replay exact.
 
+Automatic injection and `memory_search` each allocate a stable retrieval id and
+record candidate count, delivered ids/revisions/scores, token use, duration,
+session, and turn where available. Zero-result retrievals are recorded too.
+`memory_read` adds a content-free drill-down audit linked to that id, and
+feedback can reference the same delivery. Tool search and detail results have
+separate hard token ceilings.
+
 ## Persistence and lifecycle
 
 The local provider uses one SQLite database under
 `<DSH_HOME>/memory/v1/memory.sqlite` unless an absolute configured path is
-supplied. WAL, foreign keys, busy timeout, transactions, schema versioning, and
+supplied. Schema v2 adds near-duplicate candidate metadata to the v1 canonical
+schema through a forward-only transaction. WAL, foreign keys, busy timeout,
+transactions, schema versioning, and
 integrity checks protect canonical state. One process owns one writer handle;
 additional instances fail or enter explicitly configured read-only mode.
 
 Markdown pages are written through private temporary files and atomic rename.
-The provider owns the database and projection queue through a Cordis effect.
-Unload closes admission, drains owned work, then closes the database.
+A SHA-256 manifest is the generation commit marker. Removed canonical pages are
+first replaced with content-free tombstones, so a failed unlink cannot retain
+deleted knowledge. The provider owns the database through a Cordis effect;
+unload removes listeners/tools/service and closes the writer handle.
+
+Expiry, impending expiry, negative feedback, and inactivity produce a
+deterministic human review queue; they do not mutate records. Reviewed candidate
+content, raw opted-in query text, retrievals, feedback, and ordinary audit rows
+have explicit retention windows. Pending candidates and canonical records are
+never removed by retention. Physical purge requires logical deletion and keeps
+only non-content proof.
 
 ## Failure semantics
 
@@ -111,7 +131,8 @@ Unload closes admission, drains owned work, then closes the database.
 - Unsupported newer schema or failed integrity check: fail closed with stage and
   path; never replace with a fresh store.
 - Busy writer: bounded wait then actionable failure.
-- Derived index/view damage: mark degraded and rebuild from canonical revisions.
+- Derived index/view damage: mark degraded and rebuild from canonical revisions;
+  projection hashes expose partial publication or manual edits.
 - Retrieval failure: log structured diagnostics and continue without injected
   knowledge only when canonical integrity remains known; never broaden scope.
 - Proposal validation/redaction failure: reject with a reason code and store no

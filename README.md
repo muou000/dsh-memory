@@ -17,22 +17,31 @@ enters a candidate queue and cannot publish itself.
 
 ## Status
 
-Architecture and acceptance gates are fixed. Runtime implementation, tests,
-evaluation, and operations evidence are in progress; see
+The governed runtime, schema migration, model and administrative tools,
+Markdown view, backup/restore, retention, metrics, and deterministic evaluation
+entry points are implemented. Windows and Ubuntu keyless checks pass. Production
+acceptance is still blocked on held-out real-model results, representative human
+page review, and shadow/canary evidence; see
 [`docs/ACCEPTANCE_LEDGER.md`](docs/ACCEPTANCE_LEDGER.md).
 
 Supported target versions are Node.js `^22.19.0 || >=24`, pnpm 10, Cordis 4,
 and the DSH `0.1.1-rc.2` public package surface. Exact validated revisions will
 be recorded in the release report.
 
-## Planned installation shape
+## Install
 
 ```powershell
 dsh plugin --profile memory-dev add ./dsh-memory
 dsh --profile memory-dev --dump-config
+dsh-memory status --dsh-home "$env:DSH_HOME"
 ```
 
-The default store will live under `<DSH_HOME>/memory/v1`; absolute paths can be
-configured for managed storage. Installation, review, backup, restore, rollback,
-uninstall, and retention procedures will be completed in `docs/OPERATIONS.md`
-before acceptance.
+The default canonical store lives under `<DSH_HOME>/memory/v1`; the sibling
+`knowledge/README.md` is the human entry point. Use absolute configured paths
+for managed or encrypted storage. Agents can search/read verified knowledge,
+submit candidates, and attach feedback; only trusted operators can publish,
+change lifecycle state, resolve conflicts, prune telemetry, or purge content.
+
+Use `dsh-memory candidates`, `maintenance`, `metrics`, and `projection-status`
+for routine review. Full configuration, backup, migration, rollback, retention,
+and release procedures are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).

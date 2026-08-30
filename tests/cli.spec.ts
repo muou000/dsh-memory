@@ -28,11 +28,19 @@ describe('administrative CLI', () => {
     await expect(runCli([
       'publish', candidate.id,
       '--store', home.config.storagePath,
+      '--projection', home.config.projectionPath,
       '--actor', 'operator@example',
       '--reason', 'Evidence was checked by the owning team.',
     ], io)).resolves.toBe(0)
     expect(JSON.parse(stdout[0]!) as object).toMatchObject({ status: 'published' })
     expect(stderr).toEqual([])
+
+    stdout.length = 0
+    await runCli([
+      'projection-status', '--store', home.config.storagePath,
+      '--projection', home.config.projectionPath,
+    ], io)
+    expect(JSON.parse(stdout[0]!) as object).toMatchObject({ valid: true, fileCount: 5 })
 
     stdout.length = 0
     await runCli(['status', '--store', home.config.storagePath], io)

@@ -1,6 +1,6 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { resolveConfig } from '../src/config.ts'
 import type { Config, ResolvedConfig } from '../src/config.ts'
 import type { MemoryContent } from '../src/types.ts'
@@ -10,6 +10,9 @@ export interface TemporaryMemoryHome {
   readonly config: ResolvedConfig
   cleanup(): void
 }
+
+export const workspaceAlpha = resolve('test-fixtures', 'workspace-alpha')
+export const workspaceBeta = resolve('test-fixtures', 'workspace-beta')
 
 export function temporaryMemoryHome(overrides: Config = {}): TemporaryMemoryHome {
   const root = mkdtempSync(join(tmpdir(), 'dsh-memory-spec-'))
@@ -26,7 +29,7 @@ export function temporaryMemoryHome(overrides: Config = {}): TemporaryMemoryHome
 export function draft(overrides: Partial<MemoryContent> = {}): MemoryContent {
   return {
     kind: 'procedural',
-    scope: { type: 'workspace', key: 'D:\\work\\alpha' },
+    scope: { type: 'workspace', key: workspaceAlpha },
     subject: 'Stop hook reporting must not block shutdown',
     applicability: 'When reporting telemetry from the stop hook in repository alpha.',
     action: 'Queue the report asynchronously and let shutdown continue.',

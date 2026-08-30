@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util'
-import { readFileSync } from 'node:fs'
-import { pathToFileURL } from 'node:url'
+import { readFileSync, realpathSync } from 'node:fs'
+import { resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import type { Config } from './config.ts'
 import { resolveConfig } from './config.ts'
 import { restoreDatabaseBackup } from './backup.ts'
@@ -64,14 +65,18 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = defaultIo
     }
   }
 
-  const writable = !['status', 'candidates', 'conflicts', 'export'].includes(command)
+  const writable = !['status', 'projection-status', 'candidates', 'conflicts', 'maintenance', 'metrics', 'audit', 'retrievals', 'feedback', 'export'].includes(command)
   const config = resolveCliConfig(parsed.values, writable)
   const store = new MemoryStore(config)
   try {
     switch (command) {
       case 'status':
         requireCount(command, positionals, 0)
-        output(io, { health: store.health, stats: store.stats() })
+        output(io, { health: store.health, stats: store.stats(), metrics: store.metrics() })
+        return 0
+      case 'projection-status':
+        requireCount(command, positionals, 0)
+        output(io, new MarkdownProjection(config).verify())
         return 0
       case 'candidates':
         requireCount(command, positionals, 0)
@@ -80,6 +85,26 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = defaultIo
       case 'conflicts':
         requireCount(command, positionals, 0)
         output(io, store.listConflicts('open'))
+        return 0
+      case 'maintenance':
+        requireCount(command, positionals, 0)
+        output(io, store.maintenance())
+        return 0
+      case 'metrics':
+        requireCount(command, positionals, 0)
+        output(io, store.metrics())
+        return 0
+      case 'audit':
+        requireCount(command, positionals, 0)
+        output(io, store.listAudit())
+        return 0
+      case 'retrievals':
+        requireCount(command, positionals, 0)
+        output(io, store.listRetrievals())
+        return 0
+      case 'feedback':
+        requireCount(command, positionals, 0)
+        output(io, store.listFeedback())
         return 0
       case 'export':
         requireCount(command, positionals, 0)
@@ -139,6 +164,16 @@ export async function runCli(args = process.argv.slice(2), io: CliIo = defaultIo
         store.purge(id, humanActor(parsed.values.actor), requiredOption(parsed.values.reason, 'reason'))
         rebuildProjection(store, config, io, command)
         output(io, { command, memoryId: id, purged: true })
+        return 0
+      }
+      case 'prune': {
+        requireCount(command, positionals, 0)
+        const result = store.prune(
+          humanActor(parsed.values.actor),
+          requiredOption(parsed.values.reason, 'reason'),
+        )
+        rebuildProjection(store, config, io, command)
+        output(io, { command, ...result })
         return 0
       }
       case 'backup': {
@@ -234,13 +269,14 @@ Global location options:
   --projection <absolute Markdown directory>
 
 Read commands:
-  status | candidates | conflicts | export
+  status | projection-status | candidates | conflicts | maintenance | metrics | audit | retrievals | feedback | export
 
 Governance commands (require --actor and --reason):
   publish|reject|skip <candidate-id>
   invalidate|archive|revive|delete <memory-id> --revision <n>
   resolve <conflict-id> --action keep-left|keep-right|keep-both|archive-both
   purge <memory-id> --confirm <same-memory-id>
+  prune
 
 Operations:
   backup <new-absolute-path>
@@ -249,7 +285,7 @@ Operations:
   rebuild`
 
 const mainPath = process.argv[1]
-if (mainPath !== undefined && pathToFileURL(mainPath).href === import.meta.url) {
+if (mainPath !== undefined && isMainModule(mainPath)) {
   runCli().then(
     code => { process.exitCode = code },
     error => {
@@ -257,4 +293,12 @@ if (mainPath !== undefined && pathToFileURL(mainPath).href === import.meta.url) 
       process.exitCode = 1
     },
   )
+}
+
+function isMainModule(path: string): boolean {
+  try {
+    return realpathSync(path) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    return pathToFileURL(resolve(path)).href === import.meta.url
+  }
 }

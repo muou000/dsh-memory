@@ -1,4 +1,16 @@
-export const STORE_SCHEMA_VERSION = 1
+/** Canonical SQLite schema version. Writable stores migrate forward only. */
+export const STORE_SCHEMA_VERSION = 2
+
+/** The v2 addition is deliberately small and migration-safe. */
+export const MIGRATE_V1_TO_V2_SQL = `
+ALTER TABLE memory_candidates
+  ADD COLUMN similar_memory_ids_json TEXT NOT NULL DEFAULT '[]';
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+INSERT OR IGNORE INTO memory_meta(key, value) VALUES ('schema_format', '2');
+`
 
 export const CREATE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS memory_records (
@@ -77,6 +89,7 @@ CREATE TABLE IF NOT EXISTS memory_candidates (
   target_memory_id TEXT,
   expected_revision INTEGER,
   exact_duplicate_id TEXT,
+  similar_memory_ids_json TEXT NOT NULL DEFAULT '[]',
   content_hash TEXT NOT NULL,
   content_json TEXT NOT NULL,
   actor_kind TEXT NOT NULL,
@@ -156,4 +169,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
   rationale,
   tokenize = 'unicode61 remove_diacritics 2'
 );
+
+CREATE TABLE IF NOT EXISTS memory_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+) STRICT;
+INSERT OR IGNORE INTO memory_meta(key, value) VALUES ('schema_format', '2');
 `

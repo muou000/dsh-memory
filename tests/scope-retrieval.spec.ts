@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { MemoryStore } from '../src/store.ts'
 import type { TemporaryMemoryHome } from './helpers.ts'
-import { draft, proposer, reviewer, temporaryMemoryHome } from './helpers.ts'
+import { draft, proposer, reviewer, temporaryMemoryHome, workspaceAlpha, workspaceBeta } from './helpers.ts'
 
 let home: TemporaryMemoryHome | undefined
 let store: MemoryStore | undefined
@@ -31,12 +31,12 @@ describe('scope-filtered retrieval', () => {
     publish(memory, draft({
       subject: 'Alpha proxy route',
       action: 'Use the alpha-proxy adapter for third-party calls.',
-      scope: { type: 'workspace', key: 'D:\\work\\alpha' },
+      scope: { type: 'workspace', key: workspaceAlpha },
     }), 1_000)
     publish(memory, draft({
       subject: 'Beta proxy route',
       action: 'Use the beta-only proxy token.',
-      scope: { type: 'workspace', key: 'D:\\work\\beta' },
+      scope: { type: 'workspace', key: workspaceBeta },
     }), 2_000)
     publish(memory, draft({
       subject: 'Global proxy safety',
@@ -45,7 +45,7 @@ describe('scope-filtered retrieval', () => {
     }), 3_000)
 
     const hits = memory.search('proxy', {
-      workspace: 'D:\\work\\alpha',
+      workspace: workspaceAlpha,
       includeGlobal: true,
       maxSensitivity: 'internal',
     }).hits
@@ -76,7 +76,7 @@ describe('scope-filtered retrieval', () => {
     })
 
     const hits = memory.search('timeout', {
-      workspace: 'D:\\work\\alpha', includeGlobal: false, maxSensitivity: 'public',
+      workspace: workspaceAlpha, includeGlobal: false, maxSensitivity: 'public',
     }, { now: 4_000, kinds: ['semantic'] }).hits
     expect(hits.map(hit => hit.record.memoryId)).toEqual([publicId])
   })
@@ -85,9 +85,20 @@ describe('scope-filtered retrieval', () => {
     const memory = setup()
     publish(memory, draft({ subject: 'Queue alpha', action: 'Use queue transport.' }), 1_000)
     publish(memory, draft({ subject: 'Queue beta', action: 'Use queue fallback.' }), 2_000)
-    const first = memory.search('queue', { workspace: 'D:\\work\\alpha' }, { now: 10_000 })
-    const second = memory.search('queue', { workspace: 'D:\\work\\alpha' }, { now: 10_000 })
+    const first = memory.search('queue', { workspace: workspaceAlpha }, { now: 10_000 })
+    const second = memory.search('queue', { workspace: workspaceAlpha }, { now: 10_000 })
     expect(first.hits.map(hit => hit.record.memoryId)).toEqual(second.hits.map(hit => hit.record.memoryId))
     expect(first.queryHash).toMatch(/^[a-f0-9]{64}$/)
+  })
+
+  it('does not let direct model reads bypass active and sensitivity filters', () => {
+    const memory = setup()
+    const id = publish(memory, draft({ expiresAt: 2_000 }), 1_000)
+    expect(memory.get(id, { workspace: workspaceAlpha }, true, false, 3_000)).toBeUndefined()
+    expect(memory.get(id, { workspace: workspaceAlpha }, true, true, 3_000)?.memoryId).toBe(id)
+    expect(() => memory.get(id, {
+      workspace: workspaceAlpha,
+      maxSensitivity: 'top-secret' as never,
+    })).toThrow('maxSensitivity')
   })
 })

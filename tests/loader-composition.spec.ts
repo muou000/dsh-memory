@@ -9,7 +9,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import AgentRegistry from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { createUserMessage, LlmAdapter } from '@deepseek-ai/dsh-llm'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { CallId, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -131,5 +131,75 @@ describe('real Loader and agent-loop composition', () => {
     expect(loggedRecall).toBeDefined()
     expect(JSON.stringify(loggedRecall)).toContain(record.memoryId)
     expect(ctx.memories.listRecords()[0]).toMatchObject({ useCount: 1 })
+
+    const search = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: 'memory-search-accounting' as CallId,
+      name: 'memory_search',
+      arguments: { query: 'stop hook telemetry', limit: 2 },
+      agent,
+    })
+    const searchValue = search.value as {
+      retrievalId: string
+      selectedCount: number
+      estimatedTokens: number
+      context: string
+    }
+    expect(searchValue.selectedCount).toBe(1)
+    expect(searchValue.estimatedTokens).toBeLessThanOrEqual(256)
+    expect(searchValue.context).toContain(record.memoryId)
+
+    const replayedSearch = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: 'memory-search-accounting' as CallId,
+      name: 'memory_search',
+      arguments: { query: 'stop hook telemetry', limit: 2 },
+      agent,
+    })
+    expect((replayedSearch.value as { retrievalId: string }).retrievalId).toBe(searchValue.retrievalId)
+    expect(ctx.memories.listRetrievals()).toHaveLength(2)
+
+    const read = await ctx.tools.execute({
+      signal: new AbortController().signal,
+      callId: 'memory-read-accounting' as CallId,
+      name: 'memory_read',
+      arguments: { memoryId: record.memoryId, retrievalId: searchValue.retrievalId },
+      agent,
+    })
+    expect(read.value).toMatchObject({ found: true, memoryId: record.memoryId })
+    expect(ctx.memories.metrics()).toMatchObject({ retrievalCount: 2, selectedCount: 2, drillDownCount: 1 })
+  })
+
+  it('hot-disables every registration and writer resource, then reloads the same store', { timeout: 60_000 }, async () => {
+    const { ctx, workspace } = await loadComposition()
+    const candidate = ctx.memories.propose({
+      content: draft({ scope: { type: 'workspace', key: workspace } }),
+      actor: { kind: 'migration', id: 'reload-fixture' },
+      now: 1_000,
+    })
+    ctx.memories.review(candidate.id, {
+      action: 'publish', actor: reviewer, reason: 'Reload fixture reviewed.', now: 2_000,
+    })
+    const previous = ctx.memories
+    const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-memory')
+    expect(entry !== undefined).toBe(true)
+    expect(ctx.tools.get('memory_search') !== undefined).toBe(true)
+    expect(ctx.tools.get('memory_read') !== undefined).toBe(true)
+    expect(ctx.tools.get('memory_propose') !== undefined).toBe(true)
+    expect(ctx.tools.get('memory_feedback') !== undefined).toBe(true)
+
+    await ctx.loader.update(entry!.id, { disabled: true })
+    await ctx.loader.await()
+    expect(ctx.get('memories') === undefined).toBe(true)
+    expect(ctx.tools.get('memory_search') === undefined).toBe(true)
+    expect(ctx.tools.get('memory_read') === undefined).toBe(true)
+    expect(ctx.tools.get('memory_propose') === undefined).toBe(true)
+    expect(ctx.tools.get('memory_feedback') === undefined).toBe(true)
+    expect(() => previous.stats()).toThrow('store is closed')
+
+    await ctx.loader.update(entry!.id, { disabled: false })
+    await ctx.loader.await()
+    expect(ctx.memories.listRecords()).toHaveLength(1)
+    expect(ctx.tools.get('memory_search') !== undefined).toBe(true)
   })
 })

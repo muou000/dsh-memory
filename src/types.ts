@@ -90,6 +90,8 @@ export interface MemoryCandidate {
   readonly targetMemoryId?: string
   readonly expectedRevision?: number
   readonly exactDuplicateId?: string
+  /** Same-scope lexical suggestions for reviewers; never an automatic merge. */
+  readonly similarMemoryIds: readonly string[]
   readonly contentHash: string
   readonly createdAt: number
   readonly reviewedAt?: number
@@ -124,6 +126,8 @@ export interface MemorySearchHit {
 
 export interface MemorySearchResult {
   readonly queryHash: string
+  /** Number of scope- and status-eligible candidates before the result limit. */
+  readonly candidateCount: number
   readonly hits: readonly MemorySearchHit[]
   readonly durationMs: number
 }
@@ -177,6 +181,8 @@ export interface MemoryConflictResolutionInput {
 }
 
 export interface MemoryFeedbackInput {
+  /** Stable caller operation id; retries with the same id are idempotent. */
+  readonly id?: string
   readonly memoryId: string
   readonly revision: number
   readonly kind: 'helpful' | 'harmful' | 'irrelevant' | 'stale'
@@ -184,6 +190,53 @@ export interface MemoryFeedbackInput {
   readonly retrievalId?: string
   readonly note?: string
   readonly now?: number
+}
+
+export type MemoryFeedbackKind = MemoryFeedbackInput['kind']
+
+/** Durable retrieval accounting row exported for audit and replay analysis. */
+export interface MemoryRetrievalLog {
+  readonly id: string
+  readonly queryHash: string
+  readonly queryText?: string
+  readonly context: MemoryAccessContext
+  readonly candidateCount: number
+  readonly selected: readonly MemorySelectedReference[]
+  readonly tokenBudget: number
+  readonly estimatedTokens: number
+  readonly durationMs: number
+  readonly sessionId?: string
+  readonly turn?: number
+  readonly createdAt: number
+}
+
+export interface MemorySelectedReference {
+  readonly memoryId: string
+  readonly revision: number
+  readonly score: number
+}
+
+/** Durable feedback row. Feedback is append-only and never rewrites content. */
+export interface MemoryFeedbackRecord {
+  readonly id: string
+  readonly memoryId: string
+  readonly revision: number
+  readonly retrievalId?: string
+  readonly kind: MemoryFeedbackKind
+  readonly actor: MemoryActor
+  readonly note?: string
+  readonly createdAt: number
+}
+
+/** Durable, content-free (apart from bounded operator reasons) audit row. */
+export interface MemoryAuditRecord {
+  readonly seq: number
+  readonly createdAt: number
+  readonly actor: MemoryActor
+  readonly action: string
+  readonly entityType: string
+  readonly entityId: string
+  readonly details: Readonly<Record<string, unknown>>
 }
 
 export interface MemoryRetrievalLogInput {
@@ -201,6 +254,57 @@ export interface MemoryRetrievalLogInput {
   readonly now?: number
 }
 
+export interface MemoryReadInput {
+  readonly memoryId: string
+  readonly revision: number
+  readonly actor: MemoryActor
+  readonly retrievalId?: string
+  readonly now?: number
+}
+
+export type MemoryMaintenanceReason = 'expired' | 'expiring' | 'negative-feedback' | 'unused'
+
+export interface MemoryMaintenanceOptions {
+  readonly now?: number
+  /** Nominate records expiring within this many hours. */
+  readonly expiringWithinHours?: number
+  /** Nominate records whose negative feedback ratio reaches this threshold. */
+  readonly negativeFeedbackRatio?: number
+  /** Minimum feedback events before the ratio rule applies. */
+  readonly minimumFeedbackCount?: number
+  /** Nominate records not used for this many days. */
+  readonly unusedAfterDays?: number
+  /** Maximum nominations returned, after deterministic priority sorting. */
+  readonly limit?: number
+}
+
+export interface MemoryMaintenanceNomination {
+  readonly record: MemoryRecord
+  readonly reasons: readonly MemoryMaintenanceReason[]
+  readonly priority: 'high' | 'medium' | 'low'
+  readonly negativeFeedbackRatio: number
+  readonly dueAt?: number
+}
+
+export interface MemoryMaintenanceResult {
+  readonly evaluatedAt: number
+  readonly scanned: number
+  readonly nominations: readonly MemoryMaintenanceNomination[]
+  readonly expiredCount: number
+  readonly expiringCount: number
+  readonly negativeFeedbackCount: number
+  readonly unusedCount: number
+}
+
+export interface MemoryRetentionResult {
+  readonly prunedAt: number
+  readonly reviewedCandidatesDeleted: number
+  readonly retrievalQueryTextsCleared: number
+  readonly retrievalsDeleted: number
+  readonly feedbackDeleted: number
+  readonly auditRowsDeleted: number
+}
+
 export interface RenderedMemoryContext {
   readonly text: string
   readonly selected: readonly MemorySearchHit[]
@@ -215,6 +319,10 @@ export interface MemoryExport {
   readonly revisions: readonly MemoryRevision[]
   readonly candidates: readonly MemoryCandidate[]
   readonly conflicts: readonly MemoryConflict[]
+  /** Additive telemetry fields; older v1 exports may omit them. */
+  readonly retrievals: readonly MemoryRetrievalLog[]
+  readonly feedback: readonly MemoryFeedbackRecord[]
+  readonly audit: readonly MemoryAuditRecord[]
 }
 
 export interface MemoryHealth {
@@ -233,4 +341,30 @@ export interface MemoryStats {
   readonly recordsByStatus: Readonly<Record<MemoryStatus, number>>
   readonly candidatesByStatus: Readonly<Record<MemoryCandidateStatus, number>>
   readonly openConflicts: number
+}
+
+/** Operational counters derived from canonical rows and append-only telemetry. */
+export interface MemoryMetrics {
+  readonly generatedAt: number
+  readonly recordsByStatus: Readonly<Record<MemoryStatus, number>>
+  readonly candidatesByStatus: Readonly<Record<MemoryCandidateStatus, number>>
+  /** Candidate lifecycle counts, named explicitly for operational dashboards. */
+  readonly proposalOutcomes: Readonly<Record<MemoryCandidateStatus, number>>
+  readonly openConflicts: number
+  readonly pendingCandidateAgeMs?: number
+  readonly retrievalCount: number
+  readonly retrievalNoHitCount: number
+  readonly retrievalNoHitRate: number
+  readonly selectedCount: number
+  /** Selections that were durably recorded after rendering for delivery. */
+  readonly injectedCount: number
+  readonly drillDownCount: number
+  readonly estimatedTokenTotal: number
+  readonly retrievalDurationMs: Readonly<{ p50: number; p95: number; max: number }>
+  readonly feedbackByKind: Readonly<Record<MemoryFeedbackKind, number>>
+  /** Writer-lock collisions observed by this process for this store path. */
+  readonly databaseContentionCount: number
+  /** Reserved operational signal; this plugin schedules no background tasks. */
+  readonly backgroundTaskFailures: number
+  readonly projectionFailures?: number
 }

@@ -13,9 +13,17 @@ import type {
   MemoryConflictResolutionInput,
   MemoryExport,
   MemoryFeedbackInput,
+  MemoryFeedbackRecord,
   MemoryHealth,
+  MemoryAuditRecord,
+  MemoryMaintenanceOptions,
+  MemoryMaintenanceResult,
+  MemoryMetrics,
   MemoryProposalInput,
   MemoryRecord,
+  MemoryReadInput,
+  MemoryRetentionResult,
+  MemoryRetrievalLog,
   MemoryRetrievalLogInput,
   MemoryReviewInput,
   MemoryRevision,
@@ -42,16 +50,25 @@ export class MemoryService extends Service {
   private projectionState: 'ready' | 'disabled' | 'degraded'
   private lastProjectionAt: number | undefined
   private lastProjectionError: string | undefined
+  private projectionFailureCount = 0
 
   constructor(ctx: Context, config: ResolvedConfig) {
     super(ctx, 'memories')
     this.config = config
     this.log = ctx.logger('dsh-memory')
-    this.store = new MemoryStore(config)
+    try {
+      this.store = new MemoryStore(config)
+    } catch (error) {
+      this.log.error('stage=open outcome=error code=%s', classifyMemoryError(error))
+      throw error
+    }
+    // Register ownership immediately after opening the canonical resource so
+    // a future initialization failure cannot strand the database handle or
+    // writer lock. The disposer is idempotent in MemoryStore.
+    ctx.effect(() => () => this.store.close(), 'dsh-memory.store.close')
     this.projection = new MarkdownProjection(config)
     this.projectionState = config.markdownProjection ? 'degraded' : 'disabled'
     this.refreshProjection('startup')
-    ctx.effect(() => () => this.store.close())
   }
 
   get writable(): boolean {
@@ -68,30 +85,57 @@ export class MemoryService extends Service {
   }
 
   propose(input: MemoryProposalInput): MemoryCandidate {
-    const candidate = this.store.propose(input)
+    const observed = this.observe('propose', () => this.store.propose(input))
+    const candidate = observed.value
+    this.log.info(
+      'stage=propose outcome=%s candidate_id=%s operation=%s similar_count=%d duration_ms=%f',
+      candidate.status,
+      candidate.id,
+      candidate.operation,
+      candidate.similarMemoryIds.length,
+      observed.durationMs,
+    )
     this.refreshProjection('propose')
     return candidate
   }
 
   review(candidateId: string, input: MemoryReviewInput): MemoryCandidate {
-    const candidate = this.store.review(candidateId, input)
+    const observed = this.observe('review', () => this.store.review(candidateId, input))
+    const candidate = observed.value
+    this.log.info(
+      'stage=review outcome=%s candidate_id=%s published_memory_id=%s duration_ms=%f',
+      candidate.status,
+      candidate.id,
+      candidate.publishedMemoryId ?? 'none',
+      observed.durationMs,
+    )
     this.refreshProjection('review')
     return candidate
   }
 
   transition(memoryId: string, input: MemoryTransitionInput): MemoryRecord {
-    const record = this.store.transition(memoryId, input)
+    const observed = this.observe(input.action, () => this.store.transition(memoryId, input))
+    const record = observed.value
+    this.log.info(
+      'stage=%s outcome=success memory_id=%s revision=%d status=%s duration_ms=%f',
+      input.action,
+      record.memoryId,
+      record.revision,
+      record.status,
+      observed.durationMs,
+    )
     this.refreshProjection(input.action)
     return record
   }
 
   purge(memoryId: string, actor: MemoryActor, reason: string, now?: number): void {
-    this.store.purge(memoryId, actor, reason, now)
+    const observed = this.observe('purge', () => this.store.purge(memoryId, actor, reason, now))
+    this.log.info('stage=purge outcome=success memory_id=%s duration_ms=%f', memoryId, observed.durationMs)
     this.refreshProjection('purge')
   }
 
-  get(memoryId: string, access: MemoryAccessContext, includeEvidence = true): MemoryRecord | undefined {
-    return this.store.get(memoryId, access, includeEvidence)
+  get(memoryId: string, access: MemoryAccessContext, includeEvidence = true, includeInactive = false, now?: number): MemoryRecord | undefined {
+    return this.store.get(memoryId, access, includeEvidence, includeInactive, now)
   }
 
   getCandidate(candidateId: string): MemoryCandidate | undefined {
@@ -114,22 +158,77 @@ export class MemoryService extends Service {
     return this.store.listConflicts(status)
   }
 
+  listRetrievals(limit?: number): readonly MemoryRetrievalLog[] {
+    return this.store.listRetrievals(limit)
+  }
+
+  listFeedback(memoryId?: string): readonly MemoryFeedbackRecord[] {
+    return this.store.listFeedback(memoryId)
+  }
+
+  listAudit(limit?: number): readonly MemoryAuditRecord[] {
+    return this.store.listAudit(limit)
+  }
+
   resolveConflict(conflictId: string, input: MemoryConflictResolutionInput): MemoryConflict {
-    const conflict = this.store.resolveConflict(conflictId, input)
+    const observed = this.observe('resolve-conflict', () => this.store.resolveConflict(conflictId, input))
+    const conflict = observed.value
+    this.log.info(
+      'stage=resolve-conflict outcome=%s conflict_id=%s action=%s duration_ms=%f',
+      conflict.status,
+      conflict.id,
+      input.action,
+      observed.durationMs,
+    )
     this.refreshProjection('resolve-conflict')
     return conflict
   }
 
   search(query: string, access: MemoryAccessContext, options?: MemorySearchOptions): MemorySearchResult {
-    return this.store.search(query, access, options)
+    const observed = this.observe('search', () => this.store.search(query, access, options))
+    this.log.debug(
+      'stage=search outcome=success query_hash=%s candidate_count=%d hit_count=%d duration_ms=%f',
+      observed.value.queryHash,
+      observed.value.candidateCount,
+      observed.value.hits.length,
+      observed.value.durationMs,
+    )
+    return observed.value
   }
 
   recordRetrieval(input: MemoryRetrievalLogInput): void {
-    this.store.recordRetrieval(input)
+    const observed = this.observe('record-retrieval', () => this.store.recordRetrieval(input))
+    this.log.debug(
+      'stage=record-retrieval outcome=success retrieval_id=%s candidate_count=%d selected_count=%d estimated_tokens=%d duration_ms=%f',
+      input.id,
+      input.candidateCount,
+      input.selected.length,
+      input.estimatedTokens,
+      observed.durationMs,
+    )
+  }
+
+  recordRead(input: MemoryReadInput): void {
+    const observed = this.observe('record-read', () => this.store.recordRead(input))
+    this.log.debug(
+      'stage=record-read outcome=success memory_id=%s revision=%d retrieval_id=%s duration_ms=%f',
+      input.memoryId,
+      input.revision,
+      input.retrievalId ?? 'none',
+      observed.durationMs,
+    )
   }
 
   feedback(input: MemoryFeedbackInput): void {
-    this.store.feedback(input)
+    const observed = this.observe('feedback', () => this.store.feedback(input))
+    this.log.info(
+      'stage=feedback outcome=success memory_id=%s revision=%d kind=%s retrieval_id=%s duration_ms=%f',
+      input.memoryId,
+      input.revision,
+      input.kind,
+      input.retrievalId ?? 'none',
+      observed.durationMs,
+    )
     this.refreshProjection('feedback')
   }
 
@@ -137,12 +236,53 @@ export class MemoryService extends Service {
     return this.store.stats()
   }
 
+  maintenance(options?: MemoryMaintenanceOptions): MemoryMaintenanceResult {
+    const observed = this.observe('maintenance', () => this.store.maintenance(options))
+    this.log.debug(
+      'stage=maintenance outcome=success scanned=%d nominations=%d duration_ms=%f',
+      observed.value.scanned,
+      observed.value.nominations.length,
+      observed.durationMs,
+    )
+    return observed.value
+  }
+
+  prune(actor: MemoryActor, reason: string, now?: number): MemoryRetentionResult {
+    const observed = this.observe('prune', () => this.store.prune(actor, reason, now))
+    const result = observed.value
+    this.log.info(
+      'stage=prune outcome=success candidates=%d retrievals=%d feedback=%d audit=%d duration_ms=%f',
+      result.reviewedCandidatesDeleted,
+      result.retrievalsDeleted,
+      result.feedbackDeleted,
+      result.auditRowsDeleted,
+      observed.durationMs,
+    )
+    this.refreshProjection('prune')
+    return result
+  }
+
+  metrics(now?: number): MemoryMetrics {
+    const metrics = this.store.metrics(now)
+    return Object.freeze({
+      ...metrics,
+      projectionFailures: this.projectionFailureCount,
+    })
+  }
+
   export(now?: number): MemoryExport {
     return this.store.export(now)
   }
 
   restoreExport(value: unknown): void {
-    this.store.restoreExport(value)
+    const observed = this.observe('restore-export', () => this.store.restoreExport(value))
+    const stats = this.store.stats()
+    this.log.info(
+      'stage=restore-export outcome=success active=%d candidates=%d duration_ms=%f',
+      stats.recordsByStatus.active,
+      Object.values(stats.candidatesByStatus).reduce((sum, count) => sum + count, 0),
+      observed.durationMs,
+    )
     this.refreshProjection('restore-export')
   }
 
@@ -151,8 +291,24 @@ export class MemoryService extends Service {
   }
 
   rebuild(): void {
-    this.store.rebuildFts()
+    const observed = this.observe('rebuild-index', () => this.store.rebuildFts())
+    this.log.info('stage=rebuild-index outcome=success duration_ms=%f', observed.durationMs)
     this.refreshProjection('rebuild')
+  }
+
+  private observe<T>(stage: string, operation: () => T): { readonly value: T; readonly durationMs: number } {
+    const started = performance.now()
+    try {
+      return { value: operation(), durationMs: performance.now() - started }
+    } catch (error) {
+      this.log.error(
+        'stage=%s outcome=error code=%s duration_ms=%f',
+        stage,
+        classifyMemoryError(error),
+        performance.now() - started,
+      )
+      throw error
+    }
   }
 
   private refreshProjection(stage: string): void {
@@ -168,8 +324,24 @@ export class MemoryService extends Service {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.projectionState = 'degraded'
+      this.projectionFailureCount += 1
       this.lastProjectionError = `stage=${stage}: ${message}`
-      this.log.error('projection failed at %s; canonical store remains committed: %s', stage, message)
+      this.log.error('stage=projection outcome=degraded trigger=%s code=write_failed failure_count=%d', stage, this.projectionFailureCount)
     }
   }
+}
+
+function classifyMemoryError(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  if (message.includes('secret-like')) return 'secret_rejected'
+  if (message.includes('optimistic revision mismatch')) return 'revision_conflict'
+  if (message.includes('read-only')) return 'read_only'
+  if (message.includes('another writer')) return 'writer_locked'
+  if (message.includes('newer than supported') || message.includes('schema')) return 'schema_incompatible'
+  if (message.includes('quick_check') || message.includes('integrity')) return 'integrity_failed'
+  if (message.includes('unknown memory') || message.includes('unknown candidate') || message.includes('unknown conflict')) return 'not_found'
+  if (message.includes('must') || message.includes('invalid') || message.includes('unknown action') || message.includes('length')) {
+    return 'validation_failed'
+  }
+  return 'internal_error'
 }

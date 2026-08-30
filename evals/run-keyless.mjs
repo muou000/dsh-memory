@@ -1,4 +1,7 @@
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { arch, platform } from 'node:os'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { performance } from 'node:perf_hooks'
@@ -9,6 +12,17 @@ const root = await mkdtemp(join(tmpdir(), 'dsh-memory-keyless-'))
 const workspace = join(root, 'workspace')
 const foreignWorkspace = join(root, 'foreign')
 const config = resolveConfig({ dshHome: root, markdownProjection: false, retrievalCandidateLimit: 24 }, {})
+const evaluationConfig = {
+  retrievalCandidateLimit: config.retrievalCandidateLimit,
+  maxInjectedItems: config.maxInjectedItems,
+  injectionTokenBudget: config.injectionTokenBudget,
+  minConfidence: config.minConfidence,
+  injectedKinds: [...config.injectedKinds],
+  secretPolicy: config.secretPolicy,
+  logQueryText: config.logQueryText,
+}
+const sourceRevision = process.env.DSH_MEMORY_SOURCE_REVISION ?? gitRevision()
+const sourceDirty = gitDirty()
 const store = new MemoryStore(config)
 
 function publish(subject, action, scope = workspace, now = 1_000) {
@@ -95,6 +109,12 @@ const report = {
   startedAt,
   finishedAt: new Date().toISOString(),
   node: process.version,
+  platform,
+  arch,
+  sourceRevision,
+  sourceDirty,
+  config: evaluationConfig,
+  configSha256: createHash('sha256').update(JSON.stringify(evaluationConfig)).digest('hex'),
   metrics,
   thresholds: { recallAt6: 0.85, precisionAt6: 0.70, mrr: 0.80, crossWorkspaceHits: 0 },
   pass: metrics.recallAt6 >= 0.85
@@ -109,3 +129,19 @@ store.close()
 await rm(root, { recursive: true, force: true })
 console.log(JSON.stringify(report, null, 2))
 if (!report.pass) process.exitCode = 1
+
+function gitRevision() {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()
+  } catch {
+    return 'unknown'
+  }
+}
+
+function gitDirty() {
+  try {
+    return execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim().length > 0
+  } catch {
+    return true
+  }
+}

@@ -1,37 +1,30 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
+import { createHash } from 'node:crypto'
 import type { ResolvedConfig } from './config.ts'
 import { accessForAgent } from './consumer.ts'
-import { renderMemoryDetail } from './render.ts'
+import { renderMemoryContext, renderMemoryDetail } from './render.ts'
 import type { EvidenceReference, MemoryKind } from './types.ts'
 
 const SEARCH_OUTPUT = {
   type: 'object' as const,
   properties: {
+    retrievalId: { type: 'string' as const },
     queryHash: { type: 'string' as const },
-    hits: {
-      type: 'array' as const,
-      items: {
-        type: 'object' as const,
-        additionalProperties: false,
-        properties: {
-          memoryId: { type: 'string' as const },
-          revision: { type: 'integer' as const },
-          subject: { type: 'string' as const },
-          applicability: { type: 'string' as const },
-          action: { type: 'string' as const },
-          score: { type: 'number' as const },
-        },
-      },
-    },
+    candidateCount: { type: 'integer' as const },
+    selectedCount: { type: 'integer' as const },
+    estimatedTokens: { type: 'integer' as const },
+    context: { type: 'string' as const },
   },
   additionalProperties: false,
 }
 
 /** Register least-authority model tools: search, read, propose, and feedback. */
 export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () => void {
-  const disposers = [
-    ctx.tools.register(defineTool({
+  const disposers: Array<() => void> = []
+  try {
+    disposers.push(
+      ctx.tools.register(defineTool({
       name: 'memory_search',
       description: 'Search verified project knowledge visible to the current workspace. Use when prior project-specific facts, constraints, locations, or failure lessons may help.',
       parameters: {
@@ -53,24 +46,55 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
           includeEvidence: false,
           kinds: config.injectedKinds,
         })
+        const retrievalId = toolRetrievalId(agent, exec.rootCallId, result.queryHash)
+        const rendered = renderMemoryContext(result.hits, {
+          maxInjectedItems: Math.min(limit, config.maxInjectedItems),
+          injectionTokenBudget: config.injectionTokenBudget,
+          maxRenderedItemChars: config.maxRenderedItemChars,
+        }, retrievalId)
+        if (ctx.memories.writable) {
+          try {
+            ctx.memories.recordRetrieval({
+              id: retrievalId,
+              queryHash: result.queryHash,
+              ...(config.logQueryText ? { queryText: args.query } : {}),
+              context: accessForAgent(agent),
+              candidateCount: result.candidateCount,
+              selected: rendered.selected.map(hit => ({
+                memoryId: hit.record.memoryId,
+                revision: hit.record.revision,
+                score: hit.score,
+              })),
+              tokenBudget: config.injectionTokenBudget,
+              estimatedTokens: rendered.estimatedTokens,
+              durationMs: result.durationMs,
+              sessionId: String(agent.id),
+            })
+          } catch {
+            ctx.logger('dsh-memory').error(
+              'stage=tool-search-accounting outcome=error retrieval_id=%s code=accounting_failed',
+              retrievalId,
+            )
+          }
+        }
         return {
+          retrievalId,
           queryHash: result.queryHash,
-          hits: result.hits.map(hit => ({
-            memoryId: hit.record.memoryId,
-            revision: hit.record.revision,
-            subject: hit.record.subject,
-            applicability: hit.record.applicability,
-            action: hit.record.action,
-            score: hit.score,
-          })),
+          candidateCount: result.candidateCount,
+          selectedCount: rendered.selected.length,
+          estimatedTokens: rendered.estimatedTokens,
+          context: rendered.text,
         }
       },
-    })),
-    ctx.tools.register(defineTool({
+      })),
+    )
+    disposers.push(
+      ctx.tools.register(defineTool({
       name: 'memory_read',
       description: 'Read one visible verified memory with rationale and evidence locators before relying on a consequential claim.',
       parameters: {
         memoryId: { type: 'string', required: true, description: 'Memory id returned by memory_search or an injected reference.' },
+        retrievalId: { type: 'string', description: 'Retrieval batch that selected this memory, when available.' },
       },
       output: {
         schema: {
@@ -91,15 +115,35 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
         const agent = requireAgent(exec.agent)
         const record = ctx.memories.get(args.memoryId, accessForAgent(agent), true)
         if (record === undefined) return { found: false }
+        // Render before recording usage so a budget/configuration failure does
+        // not claim that an unreadable detail was delivered to the model.
+        const detail = renderMemoryDetail(record, config.drillDownTokenBudget)
+        if (ctx.memories.writable) {
+          try {
+            ctx.memories.recordRead({
+              memoryId: record.memoryId,
+              revision: record.revision,
+              actor: { kind: 'agent', id: String(agent.id) },
+              ...(args.retrievalId === undefined ? {} : { retrievalId: args.retrievalId }),
+            })
+          } catch {
+            ctx.logger('dsh-memory').error(
+              'stage=tool-read-accounting outcome=error memory_id=%s code=accounting_failed',
+              record.memoryId,
+            )
+          }
+        }
         return {
           found: true,
           memoryId: record.memoryId,
           revision: record.revision,
-          detail: renderMemoryDetail(record),
+          detail,
         }
       },
-    })),
-    ctx.tools.register(defineTool({
+      })),
+    )
+    disposers.push(
+      ctx.tools.register(defineTool({
       name: 'memory_propose',
       description: 'Propose a project-specific reusable fact, hidden location, constraint, or verified lesson for human review. This never publishes knowledge directly. Do not submit general advice, raw transcripts, secrets, or one-off task state.',
       parameters: {
@@ -120,6 +164,7 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
             candidateId: { type: 'string' },
             status: { type: 'string' },
             exactDuplicateId: { type: 'string' },
+            similarMemoryIds: { type: 'array', items: { type: 'string' } },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.status === 'candidate'
@@ -135,7 +180,6 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
         const evidence: EvidenceReference[] = [{
           kind: 'session-event',
           locator: `session:${String(agent.id)};through-seq:${Math.max(0, agent.session.seq - 1)}`,
-          observedAt: Date.now(),
         }]
         if (args.sourceKind !== undefined || args.sourceLocator !== undefined) {
           if (args.sourceKind === undefined || args.sourceLocator === undefined) {
@@ -162,17 +206,21 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
         return {
           candidateId: candidate.id,
           status: candidate.status,
+          similarMemoryIds: [...candidate.similarMemoryIds],
           ...(candidate.exactDuplicateId === undefined ? {} : { exactDuplicateId: candidate.exactDuplicateId }),
         }
       },
-    })),
-    ctx.tools.register(defineTool({
+      })),
+    )
+    disposers.push(
+      ctx.tools.register(defineTool({
       name: 'memory_feedback',
       description: 'Report whether a retrieved memory was helpful, harmful, irrelevant, or stale. Feedback affects review and ranking but never rewrites the memory.',
       parameters: {
         memoryId: { type: 'string', required: true },
         revision: { type: 'integer', required: true },
         kind: { type: 'string', enum: ['helpful', 'harmful', 'irrelevant', 'stale'], required: true },
+        retrievalId: { type: 'string', description: 'Retrieval batch id shown in the injected knowledge block, when available.' },
         note: { type: 'string', description: 'Short evidence-based reason without secrets.' },
       },
       output: {
@@ -192,16 +240,22 @@ export function registerMemoryTools(ctx: Context, config: ResolvedConfig): () =>
           throw new Error('memory is not visible or revision is not current')
         }
         ctx.memories.feedback({
+          id: toolFeedbackId(agent, exec.rootCallId, args.memoryId, args.revision, args.kind),
           memoryId: args.memoryId,
           revision: args.revision,
           kind: args.kind,
           actor: { kind: 'agent', id: String(agent.id) },
+          ...(args.retrievalId === undefined ? {} : { retrievalId: args.retrievalId }),
           ...(args.note === undefined ? {} : { note: args.note }),
         })
         return { recorded: true }
       },
-    })),
-  ]
+      })),
+    )
+  } catch (error) {
+    for (const dispose of disposers.reverse()) dispose()
+    throw error
+  }
   return () => {
     for (const dispose of disposers.reverse()) dispose()
   }
@@ -219,4 +273,29 @@ function requireAgent<T>(agent: T | undefined): T & {
     readonly id: string
     readonly session: { readonly header: { readonly cwd?: string }; readonly seq: number }
   }
+}
+
+/** Keep tool retrieval accounting stable when a logged tool call is replayed. */
+function toolRetrievalId(
+  agent: { readonly id: string; readonly session: { readonly header: { readonly cwd?: string } } },
+  rootCallId: unknown,
+  queryHashValue: string,
+): string {
+  const digest = createHash('sha256')
+    .update(`${String(agent.id)}\u0000${String(agent.session.header.cwd ?? '')}\u0000${String(rootCallId)}\u0000${queryHashValue}`, 'utf8')
+    .digest('hex')
+  return `tool-${digest}`
+}
+
+function toolFeedbackId(
+  agent: { readonly id: string },
+  rootCallId: unknown,
+  memoryId: string,
+  revision: number,
+  kind: string,
+): string {
+  const digest = createHash('sha256')
+    .update(`${String(agent.id)}\u0000${String(rootCallId)}\u0000${memoryId}\u0000${revision}\u0000${kind}`, 'utf8')
+    .digest('hex')
+  return `feedback-${digest}`
 }
