@@ -11,6 +11,11 @@ const packDirectory = join(root, 'packages')
 const consumer = join(root, 'consumer')
 const checks = {}
 let report
+// Sample the source before `pnpm pack` runs lifecycle hooks. The generated
+// report itself and reports from another evaluator must not make a clean
+// candidate look dirty.
+const sourceRevision = process.env.DSH_MEMORY_SOURCE_REVISION ?? git(['rev-parse', 'HEAD']).stdout.trim()
+const sourceDirty = git(['status', '--porcelain', '--untracked-files=all']).stdout.trim().length > 0
 
 try {
   await mkdir(packDirectory, { recursive: true })
@@ -55,8 +60,6 @@ try {
   checks.productionAudit = audit.status === 0
   if (!checks.productionAudit) throw new Error(`production dependency audit failed: ${audit.stdout.trim()} ${audit.stderr.trim()}`)
 
-  const sourceRevision = git(['rev-parse', 'HEAD']).stdout.trim()
-  const sourceDirty = git(['status', '--porcelain']).stdout.trim().length > 0
   const pass = Object.values(checks).every(Boolean)
   report = {
     format: 'dsh-memory-pack-smoke',
