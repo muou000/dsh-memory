@@ -140,7 +140,9 @@ function gitRevision() {
 
 function gitDirty() {
   try {
-    return execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], { encoding: 'utf8' }).trim().length > 0
+    return execFileSync('git', [
+      'status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude)evals/reports/**',
+    ], { encoding: 'utf8' }).trim().length > 0
   } catch {
     return true
   }

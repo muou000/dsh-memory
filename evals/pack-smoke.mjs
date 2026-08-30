@@ -15,7 +15,9 @@ let report
 // report itself and reports from another evaluator must not make a clean
 // candidate look dirty.
 const sourceRevision = process.env.DSH_MEMORY_SOURCE_REVISION ?? git(['rev-parse', 'HEAD']).stdout.trim()
-const sourceDirty = git(['status', '--porcelain', '--untracked-files=all']).stdout.trim().length > 0
+const sourceDirty = git([
+  'status', '--porcelain', '--untracked-files=all', '--', '.', ':(exclude)evals/reports/**',
+]).stdout.trim().length > 0
 
 try {
   await mkdir(packDirectory, { recursive: true })

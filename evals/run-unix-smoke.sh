@@ -14,8 +14,9 @@ if [[ -n "$report_path" ]]; then
 fi
 
 source_revision=${DSH_MEMORY_SOURCE_REVISION:-$(git -C "$source_root" rev-parse HEAD 2>/dev/null || printf 'unknown')}
-if git -C "$source_root" status --porcelain --untracked-files=all >/dev/null 2>&1; then
-  if [[ -n "$(git -C "$source_root" status --porcelain --untracked-files=all)" ]]; then
+git_status_args=(status --porcelain --untracked-files=all -- . ':(exclude)evals/reports/**')
+if git -C "$source_root" "${git_status_args[@]}" >/dev/null 2>&1; then
+  if [[ -n "$(git -C "$source_root" "${git_status_args[@]}")" ]]; then
     source_dirty=true
   else
     source_dirty=false
