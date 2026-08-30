@@ -26,4 +26,4 @@ gates marked `NOT RUN`.
 | Windows and Unix-like supported matrix | PASS | Windows clean check plus `evals/reports/unix-smoke-latest.json` (Ubuntu 24.04, Node 24.20.0, frozen install/Loader/keyless all true); full CI Node 22/24 matrix remains required |
 | Packed-artifact clean install and dependency audit | PASS | `evals/reports/pack-smoke-latest.json`; clean tarball install, public import, CLI, and production audit all true |
 | Shadow/canary observation | NOT RUN | No deployment observation supplied |
-| Parent submodule pin and combined checks | PASS | Top-level commit `70aa536` pins plugin `7a9a33b`; `scripts/check-all.ps1` passed both plugins and `git submodule status --recursive` is clean |
+| Parent submodule pin and combined checks | PASS | Top-level gitlink points to this committed plugin evidence revision; `scripts/check-all.ps1` passed both plugins and `git submodule status --recursive` is clean |
