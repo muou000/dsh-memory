@@ -36,6 +36,37 @@ dsh --profile memory-dev --dump-config
 dsh-memory status --dsh-home "$env:DSH_HOME"
 ```
 
+## Configuration
+
+Use absolute paths for managed storage. This example keeps automatic recall
+enabled, limits the model-visible block, and writes the human projection next
+to the canonical database:
+
+```yaml
+- name: dsh-memory
+  config:
+    dshHome: 'C:/managed/dsh'
+    autoInject: true
+    maxInjectedItems: 6
+    injectionTokenBudget: 1200
+    markdownProjection: true
+    secretPolicy: reject
+    logQueryText: false
+```
+
+Verify both views after loading or restoring a profile:
+
+```powershell
+dsh --profile memory-dev --dump-config
+dsh-memory status --dsh-home 'C:\managed\dsh'
+dsh-memory projection-status --dsh-home 'C:\managed\dsh'
+```
+
+The generated `knowledge/` directory is read-only from an operator's point of
+view; publish, correction, deletion, backup, and rollback go through the
+service or the administrative CLI. The complete lifecycle and rollback steps
+are in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 The default canonical store lives under `<DSH_HOME>/memory/v1`; the sibling
 `knowledge/README.md` is the human entry point. Use absolute configured paths
 for managed or encrypted storage. Agents can search/read verified knowledge,
