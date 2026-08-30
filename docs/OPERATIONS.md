@@ -154,10 +154,16 @@ pnpm run eval:keyless
 pnpm run eval:benchmark
 pnpm run eval:operations
 pnpm run eval:pack
-pnpm run eval:model -- --dataset <held-out.json> `
-  --observations <paired-observations.json> --runs 5
+pnpm run eval:model -- --dataset <release-held-out.json> `
+  --observations <release-paired-observations.json> --runs 5
 git diff --check
 ```
+
+Reject the release unless the model report contains `status: PASS`,
+`releaseEligible: true`, all four required capability labels, and an approved
+human `releaseReview` pinned to the dataset hash and candidate revision. A
+`qualification: pilot` report remains development evidence even when every
+pilot pair succeeds.
 
 Run `evals/run-unix-smoke.sh` on one Unix-like host in addition to Windows.
 Record the exact plugin and DSH revisions, dataset/scorer hashes, benchmark,

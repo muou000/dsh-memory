@@ -7,10 +7,20 @@ const REPORT_FORMAT = 'dsh-memory-model-evaluation'
 const DATASET_FORMAT = 'dsh-memory-model-dataset'
 const OBSERVATIONS_FORMAT = 'dsh-memory-model-observations'
 const VERSION = 1
+const MINIMUM_RELEASE_CASES = 20
+const MINIMUM_RELEASE_FAMILIES = 4
+const REQUIRED_RELEASE_CAPABILITIES = [
+  'decision-recall',
+  'procedural-operational-reuse',
+  'correction-staleness-conflict',
+  'scope-privacy-refusal',
+]
 const output = process.env.DSH_MEMORY_MODEL_EVAL_OUTPUT ?? 'evals/reports/model-latest.json'
 const generatedAt = new Date().toISOString()
 
+const rawArgs = process.argv.slice(2)
 const { values } = parseArgs({
+  args: rawArgs[0] === '--' ? rawArgs.slice(1) : rawArgs,
   options: {
     dataset: { type: 'string' },
     observations: { type: 'string' },
@@ -28,6 +38,7 @@ if (!Number.isSafeInteger(requiredRuns) || requiredRuns < 5) {
     status: 'INVALID',
     reason: '--runs must be an integer of at least 5',
     requiredRuns,
+    releaseEligible: false,
     pass: false,
   }, 1)
 } else if (values.dataset === undefined || values.observations === undefined) {
@@ -38,6 +49,7 @@ if (!Number.isSafeInteger(requiredRuns) || requiredRuns < 5) {
     status: 'NOT RUN',
     reason: 'Supply --dataset and --observations from a frozen held-out paired DSH experiment.',
     requiredRuns,
+    releaseEligible: false,
     pass: false,
   }, 2)
 } else {
@@ -63,6 +75,7 @@ if (!Number.isSafeInteger(requiredRuns) || requiredRuns < 5) {
       status: 'INVALID',
       reason: error instanceof Error ? error.message : String(error),
       requiredRuns,
+      releaseEligible: false,
       pass: false,
     }, 1)
   }
@@ -74,15 +87,41 @@ function score(dataset, input, context) {
   assertEqual(dataset.version, VERSION, 'dataset.version')
   const datasetId = nonEmpty(dataset.id, 'dataset.id')
   assertEqual(dataset.split, 'held-out', 'dataset.split')
+  const qualification = dataset.qualification
+  if (qualification !== 'pilot' && qualification !== 'release') {
+    throw new Error('dataset.qualification must equal "pilot" or "release"')
+  }
   const cases = array(dataset.cases, 'dataset.cases')
   if (cases.length === 0) throw new Error('dataset.cases must not be empty')
   const caseIds = new Set()
+  const families = new Set()
+  const coveredCapabilities = new Set()
   for (const [index, item] of cases.entries()) {
     assertObject(item, `dataset.cases[${index}]`)
     const id = nonEmpty(item.id, `dataset.cases[${index}].id`)
-    nonEmpty(item.family, `dataset.cases[${index}].family`)
+    const family = nonEmpty(item.family, `dataset.cases[${index}].family`)
     if (caseIds.has(id)) throw new Error(`duplicate dataset case id: ${id}`)
     caseIds.add(id)
+    families.add(family)
+    const capabilities = validateCapabilities(
+      item.capabilities ?? [],
+      `dataset.cases[${index}].capabilities`,
+    )
+    if (qualification === 'release' && capabilities.length === 0) {
+      throw new Error(`dataset.cases[${index}].capabilities must not be empty for a release dataset`)
+    }
+    for (const capability of capabilities) coveredCapabilities.add(capability)
+  }
+  if (qualification === 'release' && cases.length < MINIMUM_RELEASE_CASES) {
+    throw new Error(`release dataset must contain at least ${MINIMUM_RELEASE_CASES} cases`)
+  }
+  if (qualification === 'release' && families.size < MINIMUM_RELEASE_FAMILIES) {
+    throw new Error(`release dataset must contain at least ${MINIMUM_RELEASE_FAMILIES} task families`)
+  }
+  const missingCapabilities = REQUIRED_RELEASE_CAPABILITIES
+    .filter(capability => !coveredCapabilities.has(capability))
+  if (qualification === 'release' && missingCapabilities.length > 0) {
+    throw new Error(`release dataset is missing required capabilities: ${missingCapabilities.join(', ')}`)
   }
 
   assertObject(input, 'observations')
@@ -108,6 +147,12 @@ function score(dataset, input, context) {
     maxRetries: nonNegativeInteger(experiment.budgets.maxRetries, 'budgets.maxRetries'),
   }
   assertEqual(experiment.requiredRuns, context.requiredRuns, 'observations.experiment.requiredRuns')
+  const releaseReview = validateReleaseReview(
+    input.releaseReview,
+    qualification,
+    context.datasetSha256,
+    candidateRevision,
+  )
 
   const observations = array(input.observations, 'observations.observations')
   const expectedCount = cases.length * context.requiredRuns * 2
@@ -164,6 +209,8 @@ function score(dataset, input, context) {
   const efficiencyViolations = []
   const thresholds = {
     minimumRunsPerCase: 5,
+    minimumReleaseCases: MINIMUM_RELEASE_CASES,
+    minimumReleaseFamilies: MINIMUM_RELEASE_FAMILIES,
     successAbsoluteImprovement: 0.10,
     repeatedExplorationReduction: 0.20,
     maximumSuccessRegressionWhenExplorationImproves: 0.02,
@@ -183,11 +230,15 @@ function score(dataset, input, context) {
     || (explorationReduction !== null
       && explorationReduction >= thresholds.repeatedExplorationReduction
       && successDelta >= -thresholds.maximumSuccessRegressionWhenExplorationImproves)
+  const releaseReviewApproved = releaseReview?.decision === 'approve'
+  const releaseReviewSatisfied = qualification === 'pilot' || releaseReviewApproved
   const pass = outcomeImproved
     && candidateCriticalEvents.length === 0
     && budgetViolations.length === 0
     && efficiencyViolations.length === 0
     && missingReviews.length === 0
+    && releaseReviewSatisfied
+  const releaseEligible = pass && qualification === 'release'
 
   return {
     format: REPORT_FORMAT,
@@ -195,6 +246,17 @@ function score(dataset, input, context) {
     generatedAt: context.generatedAt,
     status: pass ? 'PASS' : 'FAIL',
     pass,
+    releaseEligible,
+    qualification,
+    coverage: {
+      caseCount: cases.length,
+      familyCount: families.size,
+      minimumReleaseCases: MINIMUM_RELEASE_CASES,
+      minimumReleaseFamilies: MINIMUM_RELEASE_FAMILIES,
+      requiredCapabilities: REQUIRED_RELEASE_CAPABILITIES,
+      coveredCapabilities: [...coveredCapabilities].sort(),
+      missingCapabilities,
+    },
     experiment: {
       id: experiment.id,
       datasetId,
@@ -226,13 +288,67 @@ function score(dataset, input, context) {
       efficiencyViolations,
       missingRequiredReviewCount: missingReviews.length,
       successSources: countBy(pairs.flatMap(pair => [pair.baseline.successSource, pair.candidate.successSource])),
+      releaseReviewApproved,
     },
+    releaseReview,
     perCase: [...caseIds].map(caseId => summarizeCase(caseId, pairs)),
     worstRegressions: worstRegressions.map(pair => ({ caseId: pair.caseId, run: pair.run })),
     graderDisagreements: disagreements.map(pair => ({ caseId: pair.caseId, run: pair.run })),
     missingReviews,
     candidateCriticalEvents,
     budgetViolations,
+  }
+}
+
+function validateCapabilities(raw, label) {
+  const seen = new Set()
+  return array(raw, label).map((value, index) => {
+    const capability = nonEmpty(value, `${label}[${index}]`)
+    if (!REQUIRED_RELEASE_CAPABILITIES.includes(capability)) {
+      throw new Error(`${label}[${index}] is not a recognized release capability`)
+    }
+    if (seen.has(capability)) throw new Error(`${label} contains duplicate capability: ${capability}`)
+    seen.add(capability)
+    return capability
+  })
+}
+
+function validateReleaseReview(raw, qualification, datasetSha256, candidateRevision) {
+  if (qualification === 'pilot') {
+    if (raw !== undefined) throw new Error('pilot observations.releaseReview must be omitted')
+    return null
+  }
+  if (raw === undefined) throw new Error('release observations.releaseReview is required')
+  assertObject(raw, 'observations.releaseReview')
+  if (raw.decision !== 'approve' && raw.decision !== 'reject') {
+    throw new Error('observations.releaseReview.decision must equal "approve" or "reject"')
+  }
+  assertObject(raw.reviewer, 'observations.releaseReview.reviewer')
+  assertEqual(raw.reviewer.kind, 'human', 'observations.releaseReview.reviewer.kind')
+  const reviewer = {
+    kind: 'human',
+    id: nonEmpty(raw.reviewer.id, 'observations.releaseReview.reviewer.id'),
+  }
+  const reviewedAt = isoTimestamp(raw.reviewedAt, 'observations.releaseReview.reviewedAt')
+  assertEqual(raw.datasetSha256, datasetSha256, 'observations.releaseReview.datasetSha256')
+  assertEqual(raw.candidateRevision, candidateRevision, 'observations.releaseReview.candidateRevision')
+  const confirmedCapabilities = validateCapabilities(
+    raw.confirmedCapabilities,
+    'observations.releaseReview.confirmedCapabilities',
+  )
+  const missingCapabilities = REQUIRED_RELEASE_CAPABILITIES
+    .filter(capability => !confirmedCapabilities.includes(capability))
+  if (missingCapabilities.length > 0) {
+    throw new Error(`release review is missing capability confirmations: ${missingCapabilities.join(', ')}`)
+  }
+  return {
+    decision: raw.decision,
+    reviewer,
+    reviewedAt,
+    datasetSha256,
+    candidateRevision,
+    confirmedCapabilities: [...confirmedCapabilities].sort(),
+    rationale: nonEmpty(raw.rationale, 'observations.releaseReview.rationale'),
   }
 }
 
@@ -421,6 +537,15 @@ function sha256Digest(value, label) {
 function nonEmpty(value, label) {
   if (typeof value !== 'string' || value.trim().length === 0) throw new Error(`${label} must be a non-empty string`)
   return value.trim()
+}
+
+function isoTimestamp(value, label) {
+  const result = nonEmpty(value, label)
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/.test(result)
+    || Number.isNaN(Date.parse(result))) {
+    throw new Error(`${label} must be an ISO-8601 UTC timestamp`)
+  }
+  return result
 }
 
 function positiveInteger(value, label) {

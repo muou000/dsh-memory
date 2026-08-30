@@ -1,0 +1,143 @@
+{
+  "format": "dsh-memory-model-evaluation",
+  "version": 1,
+  "generatedAt": "2026-08-30T06:24:16.633Z",
+  "status": "PASS",
+  "pass": true,
+  "releaseEligible": false,
+  "qualification": "pilot",
+  "coverage": {
+    "caseCount": 1,
+    "familyCount": 1,
+    "minimumReleaseCases": 20,
+    "minimumReleaseFamilies": 4,
+    "requiredCapabilities": [
+      "decision-recall",
+      "procedural-operational-reuse",
+      "correction-staleness-conflict",
+      "scope-privacy-refusal"
+    ],
+    "coveredCapabilities": [],
+    "missingCapabilities": [
+      "decision-recall",
+      "procedural-operational-reuse",
+      "correction-staleness-conflict",
+      "scope-privacy-refusal"
+    ]
+  },
+  "experiment": {
+    "id": "pilot-memory-recall-2026-08-30",
+    "datasetId": "pilot-approved-command-recall-2026-08-30",
+    "requiredRuns": 5,
+    "caseCount": 1,
+    "pairCount": 5,
+    "baselineRevision": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
+    "candidateRevision": "89cfd4f4f6189f68427351e87cb892c8975f2de6",
+    "dshRevision": "cd5ef8148158c3a752a658978873241fdf8e2bbc",
+    "runnerRevision": "20119a694df9345d119826c042d38c726b7adb487a1e3eb5411e9f8622bfcde7",
+    "graderRevision": "ca671e062ff694088b0e0b6307d2d4529179d350f0efe6ec55359ed1910cf41c",
+    "model": "gpt-5.6-luna",
+    "sampling": {
+      "provider": "openai",
+      "endpointClass": "configured-openai-compatible",
+      "temperature": "provider-default",
+      "seed": null,
+      "permissionMode": "read-only",
+      "telemetry": "disabled",
+      "titleModelDisabled": true
+    },
+    "budgets": {
+      "maxInputTokens": 20000,
+      "maxOutputTokens": 256,
+      "maxToolCalls": 0,
+      "maxRetries": 0
+    }
+  },
+  "hashes": {
+    "datasetSha256": "14854dfc694e6ad0b9f17342dfe60f02b79210852238e650c2842c0b2d68874c",
+    "observationsSha256": "7be554a5755ccaa5e27b265887732c2f65ced8289b0a18beec446583bf952b35",
+    "scorerSha256": "56060eadcac9ac9f71819e950200350f702900dcc27124bbf4d8979379af83b4"
+  },
+  "thresholds": {
+    "minimumRunsPerCase": 5,
+    "minimumReleaseCases": 20,
+    "minimumReleaseFamilies": 4,
+    "successAbsoluteImprovement": 0.1,
+    "repeatedExplorationReduction": 0.2,
+    "maximumSuccessRegressionWhenExplorationImproves": 0.02,
+    "maximumCostIncrease": 0.2,
+    "maximumLatencyP95Increase": 0.2,
+    "maximumCandidateCriticalEvents": 0,
+    "maximumBudgetViolations": 0,
+    "missingRequiredReviews": 0
+  },
+  "metrics": {
+    "baseline": {
+      "observations": 5,
+      "taskSuccessRate": 0,
+      "taskSuccessStandardDeviation": 0,
+      "taskSuccessWilson95": [
+        0,
+        0.434482
+      ],
+      "meanRepeatedExploration": 0,
+      "repeatedExplorationStandardDeviation": 0,
+      "inputTokens": 77805,
+      "outputTokens": 105,
+      "modelCalls": 5,
+      "toolCalls": 0,
+      "retries": 0,
+      "estimatedCostUsd": 0.078225,
+      "latencyP50Ms": 15135.5,
+      "latencyP95Ms": 16078.3,
+      "criticalSafetyEvents": 0
+    },
+    "candidate": {
+      "observations": 5,
+      "taskSuccessRate": 1,
+      "taskSuccessStandardDeviation": 0,
+      "taskSuccessWilson95": [
+        0.565518,
+        1
+      ],
+      "meanRepeatedExploration": 0,
+      "repeatedExplorationStandardDeviation": 0,
+      "inputTokens": 80797,
+      "outputTokens": 95,
+      "modelCalls": 5,
+      "toolCalls": 0,
+      "retries": 0,
+      "estimatedCostUsd": 0.081177,
+      "latencyP50Ms": 14584.2,
+      "latencyP95Ms": 18192.2,
+      "criticalSafetyEvents": 0
+    },
+    "successAbsoluteDelta": 1,
+    "repeatedExplorationReduction": null,
+    "candidateCriticalEventCount": 0,
+    "budgetViolationCount": 0,
+    "efficiencyViolations": [],
+    "missingRequiredReviewCount": 0,
+    "successSources": {
+      "structured-grader": 10
+    },
+    "releaseReviewApproved": false
+  },
+  "releaseReview": null,
+  "perCase": [
+    {
+      "caseId": "approved-memory-migration-command",
+      "runs": 5,
+      "baselineSuccessRate": 0,
+      "candidateSuccessRate": 1,
+      "successAbsoluteDelta": 1,
+      "baselineMeanRepeatedExploration": 0,
+      "candidateMeanRepeatedExploration": 0
+    }
+  ],
+  "worstRegressions": [],
+  "graderDisagreements": [],
+  "missingReviews": [],
+  "candidateCriticalEvents": [],
+  "budgetViolations": []
+}

@@ -12,7 +12,8 @@ gates marked `NOT RUN`.
 
 | Gate | Status | Evidence |
 | --- | --- | --- |
-| Product outcome, real-model paired evaluation | NOT RUN | `evals/reports/model-latest.json`; no held-out deployment observations supplied |
+| Product outcome, release-qualified real-model evaluation | NOT RUN | `evals/reports/model-latest.json`; no 20-case/four-family release dataset and observations supplied |
+| Real-model paired pilot (development evidence) | PASS | `evals/reports/model-pilot-latest.json`; one case, five pairs, baseline 0/5 versus candidate 5/5, cost proxy +3.8%, p95 latency +13.1%, `releaseEligible: false` |
 | Public capability seam and replayable DSH injection | PASS | `tests/loader-composition.spec.ts`; clean `pnpm run test:integration` |
 | Versioned governance state machine | PASS | `tests/store-governance.spec.ts`; `tests/operations.spec.ts` |
 | ACID persistence, migration, crash recovery | PASS | `tests/backup.spec.ts`; `tests/writer-lock-subprocess.spec.ts`; `tests/operations.spec.ts` |

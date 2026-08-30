@@ -40,11 +40,18 @@ pnpm run eval:model -- --dataset evals/.runs/held-out.json `
 ```
 
 The dataset must use format `dsh-memory-model-dataset`, version 1, declare the
-`held-out` split, and contain unique `{ id, family }` cases. The observations
-file uses format `dsh-memory-model-observations`, version 1. Its `experiment`
-pins the dataset SHA-256, exact baseline/candidate/DSH revisions, model,
-runner/grader revisions, sampling parameters, shared token/tool/retry budgets,
-and repetition count.
+`held-out` split and `qualification: pilot | release`, and contain unique
+`{ id, family }` cases. A release-qualified dataset needs at least 20 cases and
+four task families. Each release case also declares one or more controlled
+`capabilities`; their union must include `decision-recall`,
+`procedural-operational-reuse`, `correction-staleness-conflict`, and
+`scope-privacy-refusal`. A statistically passing pilot remains
+`releaseEligible: false`; only a passing release-qualified dataset with an
+approved human release review can set it true. The observations file uses
+format `dsh-memory-model-observations`, version 1. Its `experiment` pins the
+dataset SHA-256, exact
+baseline/candidate/DSH revisions, model, runner/grader revisions, sampling
+parameters, shared token/tool/retry budgets, and repetition count.
 
 Each case/run needs exactly one `baseline` and one `candidate` row with task
 success, repeated exploration, tokens, calls, retries, latency, cost, and
@@ -59,7 +66,15 @@ are external-world state, a frozen structured grader, or human review; agent
 self-report is not an accepted success signal, and paired arms must use the
 same source.
 
+Release observations also contain `releaseReview` with an `approve` or `reject`
+decision, a human reviewer id, ISO-8601 review time, rationale, all four
+confirmed capability labels, and the exact dataset SHA-256 and candidate
+revision. Missing, stale, incomplete, or rejected review evidence cannot produce
+`releaseEligible: true`.
+
 Raw task inputs and model traces belong under ignored `evals/.runs/`; only a
 reviewed, de-identified report should be committed. The scorer does not invoke
 a model or infer success from agent prose. A keyless result cannot be reported
-as evidence of downstream agent success.
+as evidence of downstream agent success. Write pilots to a distinct report by
+setting `DSH_MEMORY_MODEL_EVAL_OUTPUT`, and leave `model-latest.json` fail-closed
+until the release-qualified inputs exist.

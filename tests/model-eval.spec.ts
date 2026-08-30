@@ -6,25 +6,40 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 const roots: string[] = []
+const requiredCapabilities = [
+  'decision-recall',
+  'procedural-operational-reuse',
+  'correction-staleness-conflict',
+  'scope-privacy-refusal',
+] as const
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
 describe('real-model paired evaluation scorer', () => {
-  it('passes a complete held-out paired experiment with material exploration reduction', () => {
+  it('passes a complete pilot experiment without making it release eligible', () => {
     const fixture = makeFixture()
-    const result = runScorer(fixture)
+    const result = runScorer(fixture, true)
     expect(result.status).toBe(0)
     const report = JSON.parse(readFileSync(fixture.output, 'utf8')) as {
       status: string
       pass: boolean
-      metrics: { repeatedExplorationReduction: number; missingRequiredReviewCount: number }
+      releaseEligible: boolean
+      qualification: string
+      metrics: {
+        repeatedExplorationReduction: number
+        missingRequiredReviewCount: number
+        releaseReviewApproved: boolean
+      }
       hashes: { datasetSha256: string; scorerSha256: string }
     }
-    expect(report).toMatchObject({ status: 'PASS', pass: true })
+    expect(report).toMatchObject({
+      status: 'PASS', pass: true, releaseEligible: false, qualification: 'pilot',
+    })
     expect(report.metrics.repeatedExplorationReduction).toBe(0.5)
     expect(report.metrics.missingRequiredReviewCount).toBe(0)
+    expect(report.metrics.releaseReviewApproved).toBe(false)
     expect(report.hashes.datasetSha256).toMatch(/^[a-f0-9]{64}$/)
     expect(report.hashes.scorerSha256).toMatch(/^[a-f0-9]{64}$/)
   })
@@ -65,6 +80,63 @@ describe('real-model paired evaluation scorer', () => {
       metrics: { efficiencyViolations: ['estimated_cost'] },
     })
   })
+
+  it('requires broad frozen coverage before a passing result is release eligible', () => {
+    const narrow = makeFixture({ qualification: 'release' })
+    expect(runScorer(narrow).status).toBe(1)
+    expect(JSON.parse(readFileSync(narrow.output, 'utf8'))).toMatchObject({
+      status: 'INVALID',
+      releaseEligible: false,
+    })
+
+    const incompleteCoverage = makeFixture({
+      qualification: 'release', caseCount: 20, familyCount: 4, capabilityCoverage: 'incomplete',
+    })
+    expect(runScorer(incompleteCoverage).status).toBe(1)
+    expect(JSON.parse(readFileSync(incompleteCoverage.output, 'utf8'))).toMatchObject({
+      status: 'INVALID',
+      releaseEligible: false,
+    })
+
+    const unreviewed = makeFixture({
+      qualification: 'release', caseCount: 20, familyCount: 4, releaseReview: 'missing',
+    })
+    expect(runScorer(unreviewed).status).toBe(1)
+    expect(JSON.parse(readFileSync(unreviewed.output, 'utf8'))).toMatchObject({
+      status: 'INVALID',
+      releaseEligible: false,
+    })
+
+    const rejected = makeFixture({
+      qualification: 'release', caseCount: 20, familyCount: 4, releaseReview: 'reject',
+    })
+    expect(runScorer(rejected).status).toBe(1)
+    expect(JSON.parse(readFileSync(rejected.output, 'utf8'))).toMatchObject({
+      status: 'FAIL',
+      pass: false,
+      releaseEligible: false,
+      metrics: { releaseReviewApproved: false },
+      releaseReview: { decision: 'reject' },
+    })
+
+    const release = makeFixture({ qualification: 'release', caseCount: 20, familyCount: 4 })
+    expect(runScorer(release).status).toBe(0)
+    expect(JSON.parse(readFileSync(release.output, 'utf8'))).toMatchObject({
+      status: 'PASS',
+      pass: true,
+      releaseEligible: true,
+      qualification: 'release',
+      coverage: {
+        caseCount: 20,
+        familyCount: 4,
+        minimumReleaseCases: 20,
+        minimumReleaseFamilies: 4,
+        missingCapabilities: [],
+      },
+      metrics: { releaseReviewApproved: true },
+      releaseReview: { decision: 'approve', reviewer: { kind: 'human', id: 'release-reviewer' } },
+    })
+  })
 })
 
 interface Observation {
@@ -85,7 +157,13 @@ interface Observation {
   safetyEvents: Array<{ severity: 'critical' | 'noncritical'; code: string }>
 }
 
-function makeFixture(): {
+function makeFixture(options: {
+  qualification?: 'pilot' | 'release'
+  caseCount?: number
+  familyCount?: number
+  capabilityCoverage?: 'complete' | 'incomplete'
+  releaseReview?: 'approve' | 'reject' | 'missing'
+} = {}): {
   root: string
   dataset: string
   observations: string
@@ -97,28 +175,42 @@ function makeFixture(): {
   const dataset = join(root, 'dataset.json')
   const observations = join(root, 'observations.json')
   const output = join(root, 'report.json')
+  const caseCount = options.caseCount ?? 1
+  const familyCount = options.familyCount ?? 1
+  const qualification = options.qualification ?? 'pilot'
   const datasetValue = {
     format: 'dsh-memory-model-dataset',
     version: 1,
     id: 'held-out-v1',
     split: 'held-out',
-    cases: [{ id: 'case-a', family: 'long-horizon' }],
+    qualification,
+    cases: Array.from({ length: caseCount }, (_, index) => ({
+      id: `case-${String(index + 1)}`,
+      family: `family-${String((index % familyCount) + 1)}`,
+      capabilities: qualification === 'release'
+        ? [requiredCapabilities[options.capabilityCoverage === 'incomplete' ? 0 : index % requiredCapabilities.length]]
+        : [],
+    })),
   }
   writeFileSync(dataset, JSON.stringify(datasetValue))
+  const datasetSha256 = createHash('sha256').update(readFileSync(dataset)).digest('hex')
+  const candidateRevision = '2'.repeat(40)
   const rows: Observation[] = []
-  for (let run = 1; run <= 5; run += 1) {
-    for (const arm of ['baseline', 'candidate'] as const) {
-      rows.push({
-        caseId: 'case-a', run, arm, taskSuccess: true,
-        successSource: 'external-state',
-        traceSha256: `${arm === 'baseline' ? 'a' : 'b'}${String(run).repeat(63)}`.slice(0, 64),
-        repeatedExploration: arm === 'baseline' ? 4 : 2,
-        inputTokens: 1_000, outputTokens: 200, modelCalls: 1,
-        toolCalls: arm === 'baseline' ? 4 : 2, retries: 0,
-        latencyMs: arm === 'baseline' ? 500 : 450,
-        estimatedCostUsd: 0.01,
-        safetyEvents: [],
-      })
+  for (const item of datasetValue.cases) {
+    for (let run = 1; run <= 5; run += 1) {
+      for (const arm of ['baseline', 'candidate'] as const) {
+        rows.push({
+          caseId: item.id, run, arm, taskSuccess: true,
+          successSource: 'external-state',
+          traceSha256: `${arm === 'baseline' ? 'a' : 'b'}${String(run).repeat(63)}`.slice(0, 64),
+          repeatedExploration: arm === 'baseline' ? 4 : 2,
+          inputTokens: 1_000, outputTokens: 200, modelCalls: 1,
+          toolCalls: arm === 'baseline' ? 4 : 2, retries: 0,
+          latencyMs: arm === 'baseline' ? 500 : 450,
+          estimatedCostUsd: 0.01,
+          safetyEvents: [],
+        })
+      }
     }
   }
   const input = {
@@ -127,9 +219,9 @@ function makeFixture(): {
     experiment: {
       id: 'exp-test',
       datasetId: datasetValue.id,
-      datasetSha256: createHash('sha256').update(readFileSync(dataset)).digest('hex'),
+      datasetSha256,
       baselineRevision: '1'.repeat(40),
-      candidateRevision: '2'.repeat(40),
+      candidateRevision,
       dshRevision: '3'.repeat(40),
       runnerRevision: '4'.repeat(40),
       graderRevision: '5'.repeat(40),
@@ -140,14 +232,29 @@ function makeFixture(): {
     },
     observations: rows,
     reviews: [],
+    ...(qualification === 'release' && options.releaseReview !== 'missing' ? {
+      releaseReview: {
+        decision: options.releaseReview ?? 'approve',
+        reviewer: { kind: 'human', id: 'release-reviewer' },
+        reviewedAt: '2026-08-30T00:00:00.000Z',
+        datasetSha256,
+        candidateRevision,
+        confirmedCapabilities: [...requiredCapabilities],
+        rationale: 'Frozen coverage and regression evidence reviewed.',
+      },
+    } : {}),
   }
   writeFileSync(observations, JSON.stringify(input))
   return { root, dataset, observations, output, input }
 }
 
-function runScorer(fixture: ReturnType<typeof makeFixture>): ReturnType<typeof spawnSync> {
+function runScorer(
+  fixture: ReturnType<typeof makeFixture>,
+  separator = false,
+): ReturnType<typeof spawnSync> {
   return spawnSync(process.execPath, [
     resolve('evals/run-model.mjs'),
+    ...(separator ? ['--'] : []),
     '--dataset', fixture.dataset,
     '--observations', fixture.observations,
     '--runs', '5',

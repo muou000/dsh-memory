@@ -25,6 +25,14 @@ Required outcomes:
   baseline.
 - The comparison uses equal model, tool, retry, and token budgets. At least five
   repetitions per non-deterministic case are reported with dispersion.
+- Every model dataset declares `qualification: pilot | release`. A release
+  dataset contains at least 20 frozen cases across at least four task families;
+  every case carries controlled capability labels and the suite covers decision
+  recall, procedural or operational reuse, correction/staleness/conflict
+  handling, and scope/privacy refusal. The paired observations include an
+  explicit human release review pinned to the dataset hash and candidate
+  revision. A pilot may pass its statistical thresholds but always reports
+  `releaseEligible: false`.
 - Candidate estimated cost and p95 latency may not increase by more than 20%
   against the paired baseline; the scorer reports these as explicit efficiency
   violations rather than hiding them behind a quality gain.
@@ -34,8 +42,9 @@ Required outcomes:
 - The worst regressions and all disagreements between automated and human
   graders are reviewed and included in the release report.
 
-Real-model results are mandatory before a production tag. Keyless replay may
-qualify an implementation for development or shadow deployment only.
+Release-qualified real-model results are mandatory before a production tag.
+Keyless replay and pilot results may qualify an implementation for development
+or shadow deployment only.
 
 ## 2. Capability boundary and DSH integration
 
@@ -208,10 +217,15 @@ The exact release commit must pass:
 pnpm run check
 pnpm run test:integration
 pnpm run eval:keyless
-pnpm run eval:model -- --runs 5
+pnpm run eval:model -- --dataset evals/.runs/release-held-out.json `
+  --observations evals/.runs/release-observations.json --runs 5
 pnpm pack --dry-run
 git diff --check
 ```
+
+The model report must contain `status: PASS`, `releaseEligible: true`, all four
+required capability labels, and an approved human `releaseReview`; a passing
+pilot does not satisfy this command's release gate.
 
 The parent workspace must then pin that committed plugin revision and pass:
 
