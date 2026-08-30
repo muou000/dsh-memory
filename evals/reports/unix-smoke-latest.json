@@ -3,10 +3,12 @@
   "version": 1,
   "status": "PASS",
   "pass": true,
-  "finishedAt": "2026-08-29T13:39:50.360Z",
+  "finishedAt": "2026-08-30T05:14:06.411Z",
   "os": "Ubuntu 24.04",
   "arch": "x86_64",
   "node": "v24.20.0",
+  "sourceRevision": "89cfd4f4f6189f68427351e87cb892c8975f2de6",
+  "sourceDirty": false,
   "packageManager": "pnpm@10.33.0",
   "checks": {
     "frozenInstall": true,

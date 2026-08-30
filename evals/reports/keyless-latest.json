@@ -1,11 +1,11 @@
 {
   "format": "dsh-memory-keyless-evaluation",
   "version": 1,
-  "startedAt": "2026-08-30T03:39:28.234Z",
-  "finishedAt": "2026-08-30T03:39:28.586Z",
+  "startedAt": "2026-08-30T05:12:55.217Z",
+  "finishedAt": "2026-08-30T05:12:55.523Z",
   "node": "v26.8.1",
-  "sourceRevision": "ee1e736cd423f7d38171a34ddacb09ba438d6365",
-  "sourceDirty": true,
+  "sourceRevision": "89cfd4f4f6189f68427351e87cb892c8975f2de6",
+  "sourceDirty": false,
   "config": {
     "retrievalCandidateLimit": 24,
     "maxInjectedItems": 6,
