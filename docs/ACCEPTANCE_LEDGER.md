@@ -1,6 +1,6 @@
 # Acceptance ledger
 
-Candidate code revision: `bff5dea9843ff3d53eaf432a36d4086839505e9e`  
+Candidate code revision: `ac393a6eb28535e3a7cf0a2a1d390fbd08660f78`  
 DSH revision: `cd5ef8148158c3a752a658978873241fdf8e2bbc`  
 Standard revision: 2026-08-30
 
