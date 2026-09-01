@@ -1,4 +1,4 @@
 - insert:
     - id: dsh-memory
-      name: dsh-memory
+      name: '@muou000/dsh-memory'
       config: {}

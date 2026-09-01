@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -13,11 +13,13 @@ import type { CallId, GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { load as loadYaml } from 'js-yaml'
 import * as memory from '../src/index.ts'
 import { draft, reviewer } from './helpers.ts'
 
 let root: string | undefined
 let context: Context | undefined
+const PACKAGE_NAME = '@muou000/dsh-memory'
 
 class RecordingAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
@@ -44,13 +46,19 @@ async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
   const workspace = join(root, 'workspace')
   const configPath = join(root, 'cordis.yml')
   const portableRoot = root.replaceAll('\\', '/')
+  const patch = loadYaml(await readFile(new URL('../cordis.patch.yml', import.meta.url), 'utf8')) as Array<{
+    insert?: Array<{ id?: string; name?: string }>
+  }>
+  const row = patch.flatMap(operation => operation.insert ?? []).find(entry => entry.id === 'dsh-memory')
+  expect(row).toMatchObject({ id: 'dsh-memory', name: PACKAGE_NAME })
+  if (row?.name === undefined) throw new Error('cordis.patch.yml does not insert dsh-memory')
   await writeFile(configPath, [
     "- name: '@deepseek-ai/dsh-llm'",
     "- name: '@deepseek-ai/dsh-session'",
     "- name: '@deepseek-ai/dsh-system-prompt'",
     "- name: '@deepseek-ai/dsh-tools'",
     "- name: '@deepseek-ai/dsh-agent'",
-    "- name: 'dsh-memory'",
+    `- name: '${row.name}'`,
     '  config:',
     `    dshHome: '${portableRoot}'`,
     '    injectionTokenBudget: 256',
@@ -71,7 +79,7 @@ async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
     ['@deepseek-ai/dsh-system-prompt', SystemPrompt],
     ['@deepseek-ai/dsh-tools', ToolRuntime],
     ['@deepseek-ai/dsh-agent', AgentRegistry],
-    ['dsh-memory', memory],
+    [row.name, memory],
     ['@deepseek-ai/dsh-agent-loop', AgentLoop],
   ])
   context.loader.internal = {
@@ -181,7 +189,7 @@ describe('real Loader and agent-loop composition', () => {
       action: 'publish', actor: reviewer, reason: 'Reload fixture reviewed.', now: 2_000,
     })
     const previous = ctx.memories
-    const entry = [...ctx.loader.entries()].find(item => item.options.name === 'dsh-memory')
+    const entry = [...ctx.loader.entries()].find(item => item.options.name === PACKAGE_NAME)
     expect(entry !== undefined).toBe(true)
     expect(ctx.tools.get('memory_search') !== undefined).toBe(true)
     expect(ctx.tools.get('memory_read') !== undefined).toBe(true)

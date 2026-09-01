@@ -1,7 +1,15 @@
 {
-  "name": "dsh-memory",
+  "name": "@muou000/dsh-memory",
   "version": "0.1.0",
   "description": "Governed, replayable team knowledge memory for DeepSeek Harness",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muou000/dsh-memory.git"
+  },
+  "homepage": "https://github.com/muou000/dsh-memory#readme",
+  "bugs": {
+    "url": "https://github.com/muou000/dsh-memory/issues"
+  },
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -49,6 +57,9 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "packageManager": "pnpm@10.33.0",
+  "publishConfig": {
+    "access": "public"
+  },
   "license": "MIT",
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
@@ -71,6 +82,7 @@
     "@deepseek-ai/dsh-session": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-system-prompt": "^0.1.1-rc.2",
     "@deepseek-ai/dsh-tools": "^0.1.1-rc.2",
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.0",
     "js-yaml": "^4.1.0",
     "tsdown": "^0.22.2",

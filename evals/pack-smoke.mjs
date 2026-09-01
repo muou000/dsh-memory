@@ -35,7 +35,7 @@ try {
     private: true,
     type: 'module',
     dependencies: {
-      'dsh-memory': `file:${tarball.replaceAll('\\', '/')}`,
+      '@muou000/dsh-memory': `file:${tarball.replaceAll('\\', '/')}`,
       '@deepseek-ai/cordis': '4.0.1',
       '@deepseek-ai/dsh-agent': '0.1.1-rc.2',
       '@deepseek-ai/dsh-llm': '0.1.1-rc.2',
@@ -47,14 +47,15 @@ try {
   checks.cleanInstallFromTarball = true
 
   const publicProbe = run(process.execPath, ['--input-type=module', '-e', [
-    "const api = await import('dsh-memory')",
+    "const api = await import('@muou000/dsh-memory')",
     "if (api.name !== 'dsh-memory' || typeof api.apply !== 'function' || typeof api.MemoryStore !== 'function') process.exit(1)",
     "if (typeof api.MemoryStore.prototype.restoreExport !== 'function') process.exit(1)",
   ].join(';')], consumer)
   checks.publicImport = publicProbe.status === 0
   if (!checks.publicImport) throw new Error(`public import probe failed: ${publicProbe.stderr.trim()}`)
 
-  const cliProbe = run(process.execPath, [join(consumer, 'node_modules', 'dsh-memory', 'lib', 'cli.js'), '--help'], consumer)
+  const packageRoot = join(consumer, 'node_modules', '@muou000', 'dsh-memory')
+  const cliProbe = run(process.execPath, [join(packageRoot, 'lib', 'cli.js'), '--help'], consumer)
   checks.cliHelp = cliProbe.status === 0 && cliProbe.stdout.includes('projection-status')
   if (!checks.cliHelp) throw new Error(`CLI probe failed: ${cliProbe.stderr.trim()}`)
 

@@ -31,13 +31,19 @@
 
 ## 安装
 
+npm 发布名为 `@muou000/dsh-memory`，可直接从 registry 安装：
+
+```powershell
+dsh plugin --profile web add '@muou000/dsh-memory@latest'
+```
+
 在源码仓库中安装依赖、检查并打包：
 
 ```powershell
 corepack pnpm install --frozen-lockfile
 corepack pnpm run check
 corepack pnpm pack
-$tarball = (Resolve-Path .\dsh-memory-0.1.0.tgz).Path
+$tarball = (Resolve-Path .\muou000-dsh-memory-0.1.0.tgz).Path
 ```
 
 把 tarball 安装到需要使用的 DSH profile：
@@ -142,7 +148,7 @@ dsh-memory purge <memory-id> --confirm <memory-id> --store C:\managed\memory.sql
 先停止使用该 profile 的 DSH 进程并保存数据库备份，然后移除插件：
 
 ```powershell
-dsh plugin --profile web remove dsh-memory
+dsh plugin --profile web remove '@muou000/dsh-memory'
 dsh --profile web --dump-config
 ```
 
