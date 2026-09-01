@@ -14,7 +14,7 @@
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "bin": {
-    "dsh-memory": "./lib/cli.js"
+    "dsh-memory": "lib/cli.js"
   },
   "exports": {
     ".": {
