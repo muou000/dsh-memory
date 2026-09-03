@@ -16,6 +16,39 @@ The default database is `<DSH_HOME>/memory/v1/memory.sqlite`, and the human
 view is its sibling `knowledge/` directory. Configure absolute managed paths
 when the Harness home is ephemeral or encrypted storage is required.
 
+## Automatic consolidation
+
+`autoConsolidate` is disabled by default. Enabling it makes each normally completed turn enqueue one bounded auxiliary model request; the turn itself does not wait. Only direct user text and assistant text are sent. Reasoning, tool results, plugin-injected messages, turns without a workspace, and non-completed turns are excluded.
+
+```yaml
+- id: dsh-memory
+  config:
+    autoConsolidate: true
+    consolidationMaxInputChars: 24000
+    consolidationMaxOutputTokens: 1200
+    consolidationTimeoutMs: 30000
+    consolidationMaxProposals: 3
+    consolidationRelevantMemoryLimit: 6
+    consolidationMaxConcurrency: 1
+    consolidationMaxPendingTurns: 32
+    consolidationMaxQueuedChars: 1000000
+    aiReviewMode: shadow
+    reviewProvider: review-provider
+    reviewModel: review-model
+    reviewMaxInputChars: 64000
+    reviewMaxOutputTokens: 512
+    reviewTimeoutMs: 30000
+    reviewMinConfidence: 0.9
+```
+
+By default the worker uses the route that produced the turn's assistant message. Set both `consolidationProvider` and `consolidationModel` to use a dedicated route; setting only one fails plugin load. A dedicated provider is a separate data-transfer boundary and must be approved for the workspace.
+
+AI review is disabled by default. `aiReviewMode: shadow` sends each request's complete candidate frame to a separately configured reviewer and records only a bounded verdict audit; candidates remain pending. `aiReviewMode: enforce` additionally permits automatic publish or reject only for candidates created by that exact consolidation request, with unchanged content hash, workspace evidence hash, current revision, no duplicate/near-duplicate/conflict and all local gates satisfied. A publish decision needs all checks true and `reviewMinConfidence`; a reject decision needs high confidence plus a locally corroborated failed check. Contradictory, low-confidence, malformed, stale, sensitive, unavailable, or model-failed cases defer to human review. Disable enforcement by changing the mode to `shadow` or `off`; this does not undo already published revisions, so restore from a validated backup or create an explicit inverse revision if required.
+
+Before dispatch, the worker flushes only the source Session's standard events, binds the adapter with `prepareCall`, and writes content-free reconstruction metadata plus input/system hashes to append-only `memory_audit`. It writes a completion audit with candidate ids after persistence. Session disposal cancels its work. Plugin unload stops listeners, drops queued work, aborts active calls, and waits for plugin workers before closing SQLite. DSH `session/flush` has no cancellation parameter, so a provider owns any underlying flush operation after the plugin stops waiting.
+
+The queue is process-local rather than a durable outbox. `backgroundTaskFailures` counts invalid model output, request failure, sensitive-source rejection, route mismatch and queue overflow for the current process; ordinary disposal cancellation is not a failure. There is no plugin-level retry or restart recovery in this version. The source is checked locally before a second provider call; SHA-256 audit hashes are integrity locators, not anonymization, so the database and audit rows remain sensitive. See `AUTOMATIC_MEMORY.md` for the external mechanism comparison, trust boundary, and known limitations.
+
 ## Review and lifecycle
 
 ```powershell
@@ -40,8 +73,7 @@ dsh-memory purge <memory-id> --confirm <memory-id> --store C:\managed\memory.sql
   --actor operator@example --reason "Approved privacy purge."
 ```
 
-Near-duplicate ids are review hints only. Compare applicability and evidence
-before publishing, updating, skipping, or opening a contradiction. Run
+Automatic candidates use an agent actor named `memory-consolidator:<session-id>` and a `session-event` evidence locator. Verify that source turn before deciding. Near-duplicate ids are review hints only. Compare applicability and evidence before publishing, updating, skipping, or opening a contradiction. Run
 `maintenance` on a schedule and make every lifecycle transition explicit; TTL,
 feedback, and inactivity never auto-archive a record.
 
@@ -89,12 +121,11 @@ generation exists. Missing/corrupt manifests, unexpected managed files,
 restore/import, and explicit repair fall back to a full canonical rebuild.
 `metrics` exposes process-local full rebuild, incremental update, files-written,
 and failure counters. Initial generation remains proportional to the total
-record/page count; provision maintenance windows for large first builds.
+record/page count; provision maintenance windows for large first builds. Pending-candidate consolidation provenance and all AI review request/result audits are exempt from ordinary audit pruning; reviewed candidate bodies still follow `reviewedCandidateRetentionDays`.
 
 ## Rollback and uninstall
 
-Disable automatic injection before changing the plugin version, retain the
-SQLite file and export, install the prior pinned plugin commit, and run
+Disable automatic injection and consolidation before changing the plugin version, retain the SQLite file and export, install the prior pinned plugin commit, and run
 `status` plus `rebuild`. To uninstall, disable the plugin first, export or back
 up the database, then remove only the plugin package. Delete data separately
 according to the workspace retention policy; physical purge is irreversible.
@@ -107,7 +138,7 @@ default; redaction is an explicit deployment choice. Queries are logged as
 hashes unless `logQueryText` is deliberately enabled. Retrieval is scope,
 sensitivity, status, expiry, and kind filtered before scoring. Review expired,
 stale, negative-feedback, and open-conflict queues on a schedule appropriate to
-the workspace; automatic promotion is not enabled.
+the workspace; automatic promotion is disabled in `off` and `shadow`, and is local-gated in `enforce`.
 
 Default operational retention is: reviewed candidate bodies 365 days, raw
 opted-in query text 7 days, retrieval rows 180 days, feedback 365 days, and
@@ -120,12 +151,7 @@ dsh-memory prune --store C:\managed\memory.sqlite `
   --actor operator@example --reason "Quarterly approved retention run."
 ```
 
-The CLI exposes `audit`, `retrievals`, and `feedback` for incident analysis.
-`metrics` includes candidate outcomes, actual durably recorded injections,
-review age, feedback, projection failures, process-local writer contention, and
-the background-task failure counter (currently zero because no background tasks
-are scheduled). These contain ids and bounded metadata, not model hidden
-reasoning. `logQueryText` is off by default. Storage encryption and key rotation belong to the host disk
+The CLI exposes `audit`, `retrievals`, and `feedback` for incident analysis. `metrics` includes candidate outcomes, actual durably recorded injections, review age, feedback, projection failures, process-local writer contention, and process-local automatic-consolidation failures. A separate CLI process cannot recover the live process counters. These contain ids and bounded metadata, not model hidden reasoning. `logQueryText` is off by default. Storage encryption and key rotation belong to the host disk
 or managed volume; stop the writer, take a validated backup, rotate/remount,
 then validate the new path before resuming.
 
@@ -134,6 +160,17 @@ then validate the new path before resuming.
 | Setting | Default | Meaning |
 | --- | ---: | --- |
 | `autoInject` | `true` | Recall on the first model step of a turn. |
+| `autoConsolidate` | `false` | Generate review candidates after normally completed turns. |
+| `consolidationProvider` / `consolidationModel` | unset | Optional paired auxiliary route; unset reuses the turn route. |
+| `consolidationMaxInputChars` / `consolidationMaxOutputTokens` | `24000` / `1200` | Per-request input and output bounds. |
+| `consolidationTimeoutMs` | `30000` | Auxiliary call deadline in milliseconds. |
+| `consolidationMaxProposals` / `consolidationRelevantMemoryLimit` | `3` / `6` | Per-turn candidate cap and bounded update-target context. |
+| `consolidationMaxConcurrency` / `consolidationMaxPendingTurns` | `1` / `32` | Process-local worker and queue bounds. |
+| `consolidationMaxQueuedChars` | `1000000` | Total source-character budget across queued and active consolidation jobs. |
+| `aiReviewMode` | `off` | `off`, `shadow` (audit only), or `enforce` (local-gated automatic transitions). |
+| `reviewProvider` / `reviewModel` | unset | Paired reviewer route; required for shadow/enforce and must differ from the extraction route. |
+| `reviewMaxInputChars` / `reviewMaxOutputTokens` | `64000` / `512` | Complete review-frame input and output bounds. |
+| `reviewTimeoutMs` / `reviewMinConfidence` | `30000` / `0.9` | Review deadline and minimum confidence for automatic policy decisions. |
 | `maxInjectedItems` / `injectionTokenBudget` | `6` / `1200` | Automatic and search-tool delivery limits. |
 | `drillDownTokenBudget` | `4096` | Maximum estimated tokens returned by `memory_read`. |
 | `retrievalCandidateLimit` / `minConfidence` | `24` / `0.6` | Lexical ranking pool and active-hit floor. |

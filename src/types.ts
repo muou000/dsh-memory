@@ -132,6 +132,93 @@ export interface MemorySearchResult {
   readonly durationMs: number
 }
 
+export interface MemoryConsolidationRequestAuditInput {
+  readonly requestId: string
+  readonly promptVersion: number
+  readonly sessionId: string
+  readonly turn: number
+  readonly endSeq: number
+  readonly sourceMessageSeqs: readonly number[]
+  readonly updateTargets: readonly { readonly memoryId: string; readonly revision: number }[]
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly systemHash: string
+  readonly inputHash: string
+  readonly maxInputChars: number
+  readonly maxProposals: number
+  readonly maxTokens: number
+  readonly now?: number
+}
+
+export interface MemoryConsolidationResultAuditInput {
+  readonly requestId: string
+  readonly sessionId: string
+  readonly turn: number
+  readonly endSeq: number
+  readonly candidateIds: readonly string[]
+  readonly now?: number
+}
+
+export interface MemoryAiReviewChecks {
+  readonly grounded: boolean
+  readonly durable: boolean
+  readonly scopeCorrect: boolean
+  readonly nonSensitive: boolean
+  readonly useful: boolean
+  readonly nonDuplicate: boolean
+  readonly nonConflicting: boolean
+}
+
+export interface MemoryAiReviewCandidateReference {
+  readonly candidateId: string
+  readonly candidateHash: string
+  readonly candidateRequestId: string
+  readonly candidateActorId: string
+}
+
+export interface MemoryAiReviewRequestAuditInput {
+  readonly requestId: string
+  readonly promptVersion: number
+  readonly sessionId: string
+  readonly workspace: string
+  readonly turn: number
+  readonly endSeq: number
+  readonly sourceMessageSeqs: readonly number[]
+  readonly sourceHash: string
+  readonly candidates: readonly MemoryAiReviewCandidateReference[]
+  readonly provider: string
+  readonly model: string
+  readonly reasoningEffort?: string
+  readonly systemHash: string
+  readonly inputHash: string
+  readonly maxInputChars: number
+  readonly maxTokens: number
+  readonly mode: 'shadow' | 'enforce'
+  readonly minConfidence: number
+  readonly now?: number
+}
+
+export interface MemoryAiReviewDecisionInput extends MemoryAiReviewCandidateReference {
+  readonly verdict: 'publish' | 'reject' | 'defer'
+  readonly confidence: number
+  readonly checks: MemoryAiReviewChecks
+  readonly reason: string
+}
+
+export interface MemoryAiReviewResultAuditInput {
+  readonly requestId: string
+  readonly workspace: string
+  readonly evidenceLocator: string
+  readonly evidenceContentHash: string
+  readonly reviewerId: string
+  readonly mode: 'shadow' | 'enforce'
+  readonly minConfidence: number
+  readonly outputHash: string
+  readonly decisions: readonly MemoryAiReviewDecisionInput[]
+  readonly now?: number
+}
+
 export interface MemoryProposalInput {
   readonly operation?: MemoryCandidateOperation
   readonly targetMemoryId?: string
@@ -364,7 +451,7 @@ export interface MemoryMetrics {
   readonly feedbackByKind: Readonly<Record<MemoryFeedbackKind, number>>
   /** Writer-lock collisions observed by this process for this store path. */
   readonly databaseContentionCount: number
-  /** Reserved operational signal; this plugin schedules no background tasks. */
+  /** Automatic-consolidation failures and queue drops observed by this process. */
   readonly backgroundTaskFailures: number
   readonly projectionFailures?: number
   /** Process-local count of fully verified projection rebuilds. */

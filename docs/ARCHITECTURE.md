@@ -14,12 +14,12 @@ Quality, isolation, latency, and safety are non-regression metrics.
 
 ## Capability seam
 
-This package ships four roles together because they share one public
-contract and persistence format:
+This package ships five roles together because they share one public contract and persistence format:
 
 - **Definition:** `ctx.memories` types and service operations.
 - **Provider:** local transactional SQLite store and deterministic indexes.
 - **Consumer:** scoped retrieval during `agent/pre-step` plus drill-down tools.
+- **Consolidator:** optional bounded turn-end extraction into review candidates.
 - **Human view:** generated Markdown index and record pages.
 
 The contract admits a later remote provider or semantic candidate source without
@@ -31,9 +31,12 @@ agent loop.
 
 ```text
 DSH session events / code / tests / human decisions
-                         |
-                         v
-                   candidate record
+             |                         |
+   optional bounded LLM extraction     |
+             |                         |
+             +------------+------------+
+                          v
+                    candidate record
                          |
         review / exact dedup / near-duplicate hint / conflict
                          |
@@ -98,8 +101,15 @@ Automatic injection and `memory_search` each allocate a stable retrieval id and
 record candidate count, delivered ids/revisions/scores, token use, duration,
 session, and turn where available. Zero-result retrievals are recorded too.
 `memory_read` adds a content-free drill-down audit linked to that id, and
-feedback can reference the same delivery. Tool search and detail results have
-separate hard token ceilings.
+feedback can reference the same delivery. Tool search and detail results have separate hard token ceilings.
+
+## Automatic consolidation
+
+When explicitly enabled, the consolidator snapshots direct user text and assistant text at a normally completed `turn/end`. It excludes reasoning, tool results, plugin messages, incomplete turns, and sessions without an absolute workspace. The synchronous event callback only enqueues; bounded workers perform retrieval and model calls later.
+
+Before model dispatch, the worker flushes the source session's standard events; it never adds repository-external event types to the DSH log. It then binds one prepared LLM call and writes append-only `memory_audit` reconstruction metadata: prompt version, source seqs, resolved route controls, input/system hashes, token cap, and allowed update target revisions. Same-workspace published records are the only valid update targets. Strict JSON output is converted to content only after local validation fixes scope, sensitivity, owner, evidence, expected revision, and idempotency key. Successful persistence adds a content-free completion audit naming candidate ids.
+
+The auxiliary extraction model cannot call tools, publish, reject, contradict, widen scope, or edit canonical revisions. Exact duplicate handling and near-duplicate hints remain deterministic store policies. Optional AI review has three modes: `off`, `shadow` (record-only), and `enforce` (local-gated transitions). The reviewer receives no tools, must use a distinct resolved route, and its result is never sufficient alone: local checks revalidate exact request ownership, source/candidate hashes, workspace/sensitivity, duplicates, conflicts, expiry and target revision. Review result audit and any transition commit in one transaction; malformed, contradictory, low-confidence or stale results defer to human review. Session disposal cancels its work; plugin unload removes listeners, clears pending jobs, aborts active calls, and awaits plugin-owned workers before the store closes. Because DSH `session/flush` currently has no cancellation signal, abort stops waiting for a stuck provider but cannot cancel that provider's own operation; the provider retains responsibility for its teardown.
 
 ## Persistence and lifecycle
 
@@ -119,8 +129,7 @@ the affected record pages plus deterministic global pages; an invalid manifest
 or layout falls back to a full rebuild. Removed canonical pages are first
 replaced with content-free tombstones, so a failed unlink cannot retain deleted
 knowledge. The explicit verifier still re-hashes every managed file. The
-provider owns the database through a Cordis effect; unload removes
-listeners/tools/service and closes the writer handle.
+provider owns the database through a Cordis effect; unload first drains lifecycle-owned automatic work, then removes listeners/tools/service and closes the writer handle.
 
 Expiry, impending expiry, negative feedback, and inactivity produce a
 deterministic human review queue; they do not mutate records. Reviewed candidate
@@ -140,8 +149,12 @@ only non-content proof.
   projection hashes expose partial publication or manual edits.
 - Retrieval failure: log structured diagnostics and continue without injected
   knowledge only when canonical integrity remains known; never broaden scope.
-- Proposal validation/redaction failure: reject with a reason code and store no
-  candidate content.
+- Proposal validation/redaction failure: reject with a reason code and store no candidate content.
+- Consolidation model, framing, or output failure: store no candidate, emit a content-free classified log, and increment the process-local background failure counter.
+- Consolidation queue overflow: drop the newer job, increment the failure counter, and never block `turn/end`.
+- AI review source privacy, route, framing, output, or model failure: leave the already-created candidate pending, emit only bounded hashes/ids and a classified log, and increment the process-local background failure counter.
+- AI review `shadow`: record the reviewer request/result audit but never transition a candidate. AI review `enforce`: publish/reject only when the deterministic local policy agrees; all other verdicts defer.
+- Process crash before the consolidation request audit is flushed: no durable outbox exists in this version, so the turn is not automatically retried.
 
 ## Non-goals for the first stable release
 

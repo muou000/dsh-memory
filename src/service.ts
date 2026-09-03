@@ -7,10 +7,14 @@ import { MemoryStore } from './store.ts'
 import type {
   MemoryAccessContext,
   MemoryActor,
+  MemoryAiReviewRequestAuditInput,
+  MemoryAiReviewResultAuditInput,
   MemoryCandidate,
   MemoryCandidateStatus,
   MemoryConflict,
   MemoryConflictResolutionInput,
+  MemoryConsolidationRequestAuditInput,
+  MemoryConsolidationResultAuditInput,
   MemoryExport,
   MemoryFeedbackInput,
   MemoryFeedbackRecord,
@@ -54,6 +58,9 @@ export class MemoryService extends Service {
   private projectionFullRebuildCount = 0
   private projectionIncrementalUpdateCount = 0
   private projectionFilesWritten = 0
+  private backgroundTaskFailureCount = 0
+  private readonly backgroundDrains = new Set<() => Promise<void>>()
+  private closing = false
 
   constructor(ctx: Context, config: ResolvedConfig) {
     super(ctx, 'memories')
@@ -65,10 +72,20 @@ export class MemoryService extends Service {
       this.log.error('stage=open outcome=error code=%s', classifyMemoryError(error))
       throw error
     }
-    // Register ownership immediately after opening the canonical resource so
-    // a future initialization failure cannot strand the database handle or
-    // writer lock. The disposer is idempotent in MemoryStore.
-    ctx.effect(() => () => this.store.close(), 'dsh-memory.store.close')
+    // The owning disposer drains registered workers before closing SQLite.
+    // Cordis disposes sibling fibers concurrently, so close ordering cannot be
+    // expressed by relying on effect registration order alone.
+    ctx.effect(() => async () => {
+      this.closing = true
+      const drains = [...this.backgroundDrains]
+      const results = await Promise.allSettled(drains.map(drain => drain()))
+      for (const result of results) {
+        if (result.status === 'rejected') {
+          this.log.error('stage=background-drain outcome=error code=%s', classifyMemoryError(result.reason))
+        }
+      }
+      this.store.close()
+    }, 'dsh-memory.store.close')
     this.projection = new MarkdownProjection(config)
     this.projectionState = config.markdownProjection ? 'degraded' : 'disabled'
     this.refreshProjection('startup')
@@ -76,6 +93,15 @@ export class MemoryService extends Service {
 
   get writable(): boolean {
     return !this.config.readOnly
+  }
+
+  /** Register an idempotent drain that must settle before the store closes. */
+  registerBackgroundDrain(drain: () => Promise<void>): () => void {
+    if (this.closing) throw new Error('dsh-memory background drain: service is closing')
+    this.backgroundDrains.add(drain)
+    return () => {
+      this.backgroundDrains.delete(drain)
+    }
   }
 
   get health(): MemoryHealth {
@@ -203,6 +229,31 @@ export class MemoryService extends Service {
     return observed.value
   }
 
+  /** Persist content-free reconstruction metadata before an auxiliary memory call. */
+  recordConsolidationRequest(input: MemoryConsolidationRequestAuditInput): void {
+    this.observe('record-consolidation-request', () => this.store.recordConsolidationRequest(input))
+  }
+
+  /** Link a successful auxiliary request to the review candidates it produced. */
+  recordConsolidationResult(input: MemoryConsolidationResultAuditInput): void {
+    this.observe('record-consolidation-result', () => this.store.recordConsolidationResult(input))
+  }
+
+  /** Persist content-free reconstruction metadata before an AI review call. */
+  recordAiReviewRequest(input: MemoryAiReviewRequestAuditInput): void {
+    this.observe('record-ai-review-request', () => this.store.recordAiReviewRequest(input))
+  }
+
+  /** Atomically persist AI decisions and apply any policy-authorized transitions. */
+  applyAiReviewResult(input: MemoryAiReviewResultAuditInput): readonly MemoryCandidate[] {
+    const observed = this.observe('apply-ai-review-result', () => this.store.applyAiReviewResult(input))
+    this.refreshProjection('apply-ai-review-result', observed.value.flatMap(candidate => [
+      ...(candidate.publishedMemoryId === undefined ? [] : [candidate.publishedMemoryId]),
+      ...(candidate.targetMemoryId === undefined ? [] : [candidate.targetMemoryId]),
+    ]))
+    return observed.value
+  }
+
   recordRetrieval(input: MemoryRetrievalLogInput): void {
     const observed = this.observe('record-retrieval', () => this.store.recordRetrieval(input))
     this.log.debug(
@@ -269,10 +320,16 @@ export class MemoryService extends Service {
     return result
   }
 
+  /** Record one process-local asynchronous worker failure without storing its content. */
+  recordBackgroundTaskFailure(): void {
+    this.backgroundTaskFailureCount += 1
+  }
+
   metrics(now?: number): MemoryMetrics {
     const metrics = this.store.metrics(now)
     return Object.freeze({
       ...metrics,
+      backgroundTaskFailures: this.backgroundTaskFailureCount,
       projectionFailures: this.projectionFailureCount,
       projectionFullRebuilds: this.projectionFullRebuildCount,
       projectionIncrementalUpdates: this.projectionIncrementalUpdateCount,

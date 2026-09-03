@@ -62,11 +62,10 @@ or shadow deployment only.
   content, order, and budget used by the original request.
 - Waterfall listeners always delegate with `next()` and preserve downstream
   decisions, including `startsRequestSeries`.
-- Loading, hot unloading, reloading, agent disposal, cancellation, and partial
-  initialization leave no listener, database handle, timer, watcher, or task.
+- Automatic consolidation flushes the source session's standard events before dispatch, records prompt/source/route/target metadata plus system/input hashes in append-only `memory_audit`, produces candidates, and records successful candidate ids afterward. Optional AI review defaults to `off`; `shadow` records only, while `enforce` may transition only exact request-owned candidates after local source/hash/scope/sensitivity/duplicate/conflict/revision checks and an atomic review-result transaction.
+- Loading, hot unloading, reloading, agent/session disposal, cancellation, and partial initialization leave no listener, database handle, timer, watcher, or task.
 
-Evidence: public-API typecheck, real Loader test with `cordis.patch.yml`, session
-replay snapshot, and resource-quiescence test.
+Evidence: public-API typecheck, real Loader test with `cordis.patch.yml`, session replay snapshot, automatic consolidation tests, and resource-quiescence test.
 
 ## 3. Data model and governance
 
@@ -81,8 +80,7 @@ Every canonical record contains:
 
 Required behavior:
 
-- Proposal and publication are separate transactions. Agent tools can only
-  propose workspace- or narrower-scoped candidates.
+- Proposal and publication are separate transactions. Agent tools can only propose workspace- or narrower-scoped candidates. Automatic consolidation fixes scope to the source workspace and cannot approve its own output; an explicitly configured distinct reviewer may apply only the bounded `enforce` policy, never widen scope or bypass local gates.
 - Exact duplicates are idempotent. Near duplicates are suggestions, not
   automatic merges. Different applicability conditions are never bridged into
   one record merely because their conclusions overlap.
@@ -190,13 +188,7 @@ rebuild, link validation, and manual review of representative pages.
 
 - Structured logs identify plugin and stage and include record ids/revisions,
   counts, duration, and reason codes without content or credentials.
-- Metrics cover proposal outcomes, review queue age, active/stale/conflict counts,
-  retrieval latency, no-hit rate, selected/injected counts, budget use, feedback,
-  projection failures, database contention, and background-task failures.
-  `databaseContentionCount` is explicitly process-local (writer-lock collisions
-  observed by this instance); `backgroundTaskFailures` is zero while the plugin
-  has no background scheduler. Operators must aggregate per-process metrics and
-  treat a future non-zero background counter as a release alarm.
+- Metrics cover proposal outcomes, review queue age, active/stale/conflict counts, retrieval latency, no-hit rate, selected/injected counts, budget use, feedback, projection failures, database contention, and background-task failures. `databaseContentionCount` and `backgroundTaskFailures` are explicitly process-local; operators must aggregate them per process and treat a non-zero background counter as a release alarm.
 - Health distinguishes ready, degraded-read-only, and unavailable states. A
   damaged index can rebuild; a damaged canonical store never falls back to an
   empty database silently.
@@ -241,9 +233,10 @@ Additional mandatory evidence:
 - no unresolved critical/high dependency vulnerability affecting runtime paths;
 - signed-off release report with baseline/candidate hashes, unrun tests, known
   limits, migration and rollback instructions;
-- shadow or canary observation before broad enablement. Automatic promotion is
-  out of scope until a separate policy defines impact cap, stop conditions,
-  approval, and rollback.
+- shadow or canary observation before broad enablement. `aiReviewMode: enforce`
+  remains production-ineligible until paired held-out/shadow evidence covers
+  publish precision, false reject, prompt injection, scope leakage, cost and
+  latency, with an approved deployment scope, stop conditions and rollback.
 
 ## 10. Acceptance ledger
 

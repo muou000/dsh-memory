@@ -78,6 +78,8 @@ confirmed capability labels, and the exact dataset SHA-256 and candidate
 revision. Missing, stale, incomplete, or rejected review evidence cannot produce
 `releaseEligible: true`.
 
+AI review publication policy requires its own paired `off`/`shadow`/`enforce` evaluation before production enforcement. Freeze development, validation and held-out cases separately; include durable publishable cases, temporary state, near duplicates, stale updates, conflicts, scope violations, secret/private source, malformed reviewer output and prompt-injection attacks. Report publish precision, false publish/reject, defer rate, critical scope/privacy events, calls, tokens, cost and p95 latency. Any critical event, false publication above the preregistered threshold, or sustained cost/latency breach is a stop condition; switch back to `shadow` or `off` and retain the previous database backup. The deterministic mock tests prove policy wiring only, not reviewer semantic quality or provider independence.
+
 Raw task inputs and model traces belong under ignored `evals/.runs/`; only a
 reviewed, de-identified report should be committed. The scorer does not invoke
 a model or infer success from agent prose. A keyless result cannot be reported

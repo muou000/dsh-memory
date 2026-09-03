@@ -29,12 +29,19 @@ import type {
   EvidenceReference,
   MemoryAccessContext,
   MemoryActor,
+  MemoryAiReviewCandidateReference,
+  MemoryAiReviewChecks,
+  MemoryAiReviewDecisionInput,
+  MemoryAiReviewRequestAuditInput,
+  MemoryAiReviewResultAuditInput,
   MemoryAuditRecord,
   MemoryCandidate,
   MemoryCandidateOperation,
   MemoryCandidateStatus,
   MemoryConflict,
   MemoryConflictResolutionInput,
+  MemoryConsolidationRequestAuditInput,
+  MemoryConsolidationResultAuditInput,
   MemoryContent,
   MemoryExport,
   MemoryFeedbackInput,
@@ -91,6 +98,8 @@ interface RecordDecodeContext extends RevisionDecodeContext {
   readonly firstRevisionRow: SqlRow
   readonly latestRevision: number
 }
+
+const MAX_SNAPSHOT_AUDIT_REFERENCES = 8
 
 const SENSITIVITY_LEVEL: Readonly<Record<MemorySensitivity, number>> = {
   public: 0,
@@ -333,36 +342,47 @@ export class MemoryStore {
 
     return this.transaction(() => {
       const candidate = this.requireCandidate(id)
-      if (candidate.status !== 'candidate') {
-        throw new Error(`dsh-memory review: candidate ${id} is already ${candidate.status}`)
-      }
-      if (now < candidate.createdAt) {
-        throw new Error(`dsh-memory review: review timestamp cannot precede candidate ${id}`)
-      }
-      if (input.action !== 'publish') {
-        const status = input.action === 'reject' ? 'rejected' : 'skipped'
-        this.database.prepare(
-          `UPDATE memory_candidates SET status = ?, reviewed_at = ?, reviewer_kind = ?,
-           reviewer_id = ?, decision_reason = ? WHERE id = ? AND status = 'candidate'`,
-        ).run(status, now, reviewer.kind, reviewer.id, reason, id)
-        this.audit(reviewer, `candidate.${status}`, 'candidate', id, { reason }, now)
-        return this.requireCandidate(id)
-      }
-
-      const published = this.publishCandidate(candidate, reviewer, now)
-      this.database.prepare(
-        `UPDATE memory_candidates SET status = 'published', reviewed_at = ?, reviewer_kind = ?,
-         reviewer_id = ?, decision_reason = ?, published_memory_id = ?
-         WHERE id = ? AND status = 'candidate'`,
-      ).run(now, reviewer.kind, reviewer.id, reason, published.memoryId, id)
-      this.audit(reviewer, 'candidate.publish', 'candidate', id, {
-        operation: candidate.operation,
-        publishedMemoryId: published.memoryId,
-        publishedRevision: published.revision,
-        reason,
-      }, now)
-      return this.requireCandidate(id)
+      return this.decideCandidate(candidate, input.action, reviewer, reason, now, 'review')
     })
+  }
+
+  private decideCandidate(
+    candidate: MemoryCandidate,
+    action: MemoryReviewInput['action'],
+    reviewer: MemoryActor,
+    reason: string,
+    now: number,
+    stage: string,
+  ): MemoryCandidate {
+    if (candidate.status !== 'candidate') {
+      throw new Error(`dsh-memory ${stage}: candidate ${candidate.id} is already ${candidate.status}`)
+    }
+    if (now < candidate.createdAt) {
+      throw new Error(`dsh-memory ${stage}: review timestamp cannot precede candidate ${candidate.id}`)
+    }
+    if (action !== 'publish') {
+      const status = action === 'reject' ? 'rejected' : 'skipped'
+      this.database.prepare(
+        `UPDATE memory_candidates SET status = ?, reviewed_at = ?, reviewer_kind = ?,
+         reviewer_id = ?, decision_reason = ? WHERE id = ? AND status = 'candidate'`,
+      ).run(status, now, reviewer.kind, reviewer.id, reason, candidate.id)
+      this.audit(reviewer, `candidate.${status}`, 'candidate', candidate.id, { reason }, now)
+      return this.requireCandidate(candidate.id)
+    }
+
+    const published = this.publishCandidate(candidate, reviewer, now)
+    this.database.prepare(
+      `UPDATE memory_candidates SET status = 'published', reviewed_at = ?, reviewer_kind = ?,
+       reviewer_id = ?, decision_reason = ?, published_memory_id = ?
+       WHERE id = ? AND status = 'candidate'`,
+    ).run(now, reviewer.kind, reviewer.id, reason, published.memoryId, candidate.id)
+    this.audit(reviewer, 'candidate.publish', 'candidate', candidate.id, {
+      operation: candidate.operation,
+      publishedMemoryId: published.memoryId,
+      publishedRevision: published.revision,
+      reason,
+    }, now)
+    return this.requireCandidate(candidate.id)
   }
 
   transition(memoryId: string, input: MemoryTransitionInput): MemoryRecord {
@@ -798,7 +818,19 @@ export class MemoryStore {
         auditRowsDeleted = mutationCount(this.database.prepare(
           `DELETE FROM memory_audit
            WHERE created_at < ?
-             AND action NOT IN ('record.purge', 'schema.migrate', 'restore.export')`,
+             AND action NOT IN (
+                'record.purge', 'schema.migrate', 'restore.export',
+                'ai-review.request', 'ai-review.complete'
+              )
+              AND NOT (
+                entity_type = 'consolidation'
+                AND action IN ('consolidation.request', 'consolidation.complete')
+                AND EXISTS (
+                  SELECT 1 FROM memory_candidates c
+                  WHERE c.status = 'candidate'
+                    AND c.request_id LIKE memory_audit.entity_id || ':proposal:%'
+                )
+              )`,
         ).run(auditCutoff))
       }
 
@@ -986,6 +1018,312 @@ export class MemoryStore {
       hits: Object.freeze(hits.slice(0, limit)),
       durationMs: performance.now() - started,
     })
+  }
+
+  recordConsolidationRequest(input: MemoryConsolidationRequestAuditInput): void {
+    assertObjectInput(input, 'record-consolidation-request')
+    this.assertWritable('record-consolidation-request')
+    const now = normalizeNow(input.now)
+    const requestId = normalizeIdentifier(input.requestId, 'consolidation requestId')
+    const sessionId = normalizeIdentifier(input.sessionId, 'consolidation sessionId')
+    const promptVersion = assertPositiveInteger(input.promptVersion, 'consolidation promptVersion')
+    const turn = assertPositiveInteger(input.turn, 'consolidation turn')
+    const endSeq = assertNonNegativeInteger(input.endSeq, 'consolidation endSeq')
+    const sourceMessageSeqs = normalizeIntegerArray(input.sourceMessageSeqs, 'consolidation sourceMessageSeqs', 256)
+    if (sourceMessageSeqs.some((seq, index) => seq > endSeq || (index > 0 && seq <= sourceMessageSeqs[index - 1]!))) {
+      throw new Error('dsh-memory consolidation sourceMessageSeqs must be strictly increasing and not exceed endSeq')
+    }
+    const updateTargets = normalizeRevisionReferences(input.updateTargets, 'consolidation updateTargets', 20)
+    const provider = normalizeIdentifier(input.provider, 'consolidation provider')
+    const model = normalizeIdentifier(input.model, 'consolidation model')
+    const reasoningEffort = input.reasoningEffort === undefined
+      ? undefined
+      : normalizeIdentifier(input.reasoningEffort, 'consolidation reasoningEffort')
+    const systemHash = normalizeSha256(input.systemHash, 'consolidation systemHash')
+    const inputHash = normalizeSha256(input.inputHash, 'consolidation inputHash')
+    const maxInputChars = assertPositiveInteger(input.maxInputChars, 'consolidation maxInputChars')
+    const maxProposals = assertPositiveInteger(input.maxProposals, 'consolidation maxProposals')
+    const maxTokens = assertPositiveInteger(input.maxTokens, 'consolidation maxTokens')
+    const existing = this.firstRow(
+      "SELECT seq FROM memory_audit WHERE action = 'consolidation.request' AND entity_type = 'consolidation' AND entity_id = ? LIMIT 1",
+      requestId,
+    )
+    if (existing !== undefined) throw new Error('dsh-memory consolidation requestId is already recorded')
+    this.audit(
+      { kind: 'system', id: 'dsh-memory/consolidator' },
+      'consolidation.request',
+      'consolidation',
+      requestId,
+      {
+        promptVersion,
+        sessionId,
+        turn,
+        endSeq,
+        sourceMessageSeqs,
+        updateTargets,
+        provider,
+        model,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        systemHash,
+        inputHash,
+        maxInputChars,
+        maxProposals,
+        maxTokens,
+      },
+      now,
+    )
+  }
+
+  recordConsolidationResult(input: MemoryConsolidationResultAuditInput): void {
+    assertObjectInput(input, 'record-consolidation-result')
+    this.assertWritable('record-consolidation-result')
+    const now = normalizeNow(input.now)
+    const requestId = normalizeIdentifier(input.requestId, 'consolidation requestId')
+    const sessionId = normalizeIdentifier(input.sessionId, 'consolidation sessionId')
+    const turn = assertPositiveInteger(input.turn, 'consolidation turn')
+    const endSeq = assertNonNegativeInteger(input.endSeq, 'consolidation endSeq')
+    const candidateIds = normalizeIdentifierArray(input.candidateIds, 'consolidation candidateIds', 10)
+    const request = this.firstRow(
+      "SELECT seq FROM memory_audit WHERE action = 'consolidation.request' AND entity_type = 'consolidation' AND entity_id = ? LIMIT 1",
+      requestId,
+    )
+    if (request === undefined) throw new Error('dsh-memory consolidation completion has no request audit')
+    const existing = this.firstRow(
+      "SELECT seq FROM memory_audit WHERE action = 'consolidation.complete' AND entity_type = 'consolidation' AND entity_id = ? LIMIT 1",
+      requestId,
+    )
+    if (existing !== undefined) throw new Error('dsh-memory consolidation request is already complete')
+    for (const candidateId of candidateIds) {
+      if (this.firstRow('SELECT id FROM memory_candidates WHERE id = ?', candidateId) === undefined) {
+        throw new Error('dsh-memory consolidation completion references an unknown candidate')
+      }
+    }
+    this.audit(
+      { kind: 'system', id: 'dsh-memory/consolidator' },
+      'consolidation.complete',
+      'consolidation',
+      requestId,
+      { sessionId, turn, endSeq, candidateIds },
+      now,
+    )
+  }
+
+  recordAiReviewRequest(input: MemoryAiReviewRequestAuditInput): void {
+    assertObjectInput(input, 'record-ai-review-request')
+    this.assertWritable('record-ai-review-request')
+    const now = normalizeNow(input.now)
+    const requestId = normalizeIdentifier(input.requestId, 'AI review requestId')
+    const promptVersion = assertPositiveInteger(input.promptVersion, 'AI review promptVersion')
+    const sessionId = normalizeIdentifier(input.sessionId, 'AI review sessionId')
+    const workspace = normalizeScope({ type: 'workspace', key: input.workspace }).key
+    const turn = assertPositiveInteger(input.turn, 'AI review turn')
+    const endSeq = assertNonNegativeInteger(input.endSeq, 'AI review endSeq')
+    const sourceMessageSeqs = normalizeIntegerArray(input.sourceMessageSeqs, 'AI review sourceMessageSeqs', MAX_SNAPSHOT_AUDIT_REFERENCES)
+    if (sourceMessageSeqs.some((seq, index) => seq > endSeq || (index > 0 && seq <= sourceMessageSeqs[index - 1]!))) {
+      throw new Error('dsh-memory AI review sourceMessageSeqs must be strictly increasing and not exceed endSeq')
+    }
+    const sourceHash = normalizeSha256(input.sourceHash, 'AI review sourceHash')
+    const candidates = normalizeAiReviewCandidateReferences(input.candidates, 'AI review candidates')
+    const provider = normalizeIdentifier(input.provider, 'AI review provider')
+    const model = normalizeIdentifier(input.model, 'AI review model')
+    const reasoningEffort = input.reasoningEffort === undefined
+      ? undefined
+      : normalizeIdentifier(input.reasoningEffort, 'AI review reasoningEffort')
+    const systemHash = normalizeSha256(input.systemHash, 'AI review systemHash')
+    const inputHash = normalizeSha256(input.inputHash, 'AI review inputHash')
+    const maxInputChars = assertPositiveInteger(input.maxInputChars, 'AI review maxInputChars')
+    const maxTokens = assertPositiveInteger(input.maxTokens, 'AI review maxTokens')
+    if (input.mode !== 'shadow' && input.mode !== 'enforce') {
+      throw new Error('dsh-memory AI review request mode must be shadow or enforce')
+    }
+    if (input.mode !== this.config.aiReviewMode) {
+      throw new Error('dsh-memory AI review request mode does not match configured policy')
+    }
+    const mode = input.mode
+    const minConfidence = normalizeProbability(input.minConfidence, 'AI review minConfidence')
+    const existing = this.firstRow(
+      "SELECT seq FROM memory_audit WHERE action = 'ai-review.request' AND entity_type = 'ai-review' AND entity_id = ? LIMIT 1",
+      requestId,
+    )
+    if (existing !== undefined) throw new Error('dsh-memory AI review requestId is already recorded')
+    this.audit(
+      { kind: 'system', id: 'dsh-memory/reviewer' },
+      'ai-review.request',
+      'ai-review',
+      requestId,
+      {
+        promptVersion,
+        sessionId,
+        workspace,
+        turn,
+        endSeq,
+        sourceMessageSeqs,
+        sourceHash,
+        candidates,
+        provider,
+        model,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+        systemHash,
+        inputHash,
+        maxInputChars,
+        maxTokens,
+        mode,
+        minConfidence,
+      },
+      now,
+    )
+  }
+
+  /** Atomically record one AI review result and apply its governed decisions. */
+  applyAiReviewResult(input: MemoryAiReviewResultAuditInput): readonly MemoryCandidate[] {
+    assertObjectInput(input, 'apply-ai-review-result')
+    this.assertWritable('apply-ai-review-result')
+    const now = normalizeNow(input.now)
+    const requestId = normalizeIdentifier(input.requestId, 'AI review requestId')
+    const workspace = normalizeScope({ type: 'workspace', key: input.workspace }).key
+    const evidenceLocator = normalizeIdentifier(input.evidenceLocator, 'AI review evidenceLocator')
+    const evidenceContentHash = normalizeSha256(input.evidenceContentHash, 'AI review evidenceContentHash')
+    const reviewerId = normalizeIdentifier(input.reviewerId, 'AI review reviewerId')
+    if (input.mode !== 'shadow' && input.mode !== 'enforce') {
+      throw new Error('dsh-memory AI review mode must be shadow or enforce')
+    }
+    const mode = input.mode
+    if (mode !== this.config.aiReviewMode) {
+      throw new Error('dsh-memory AI review result mode does not match configured policy')
+    }
+    const minConfidence = normalizeProbability(input.minConfidence, 'AI review minConfidence')
+    const outputHash = normalizeSha256(input.outputHash, 'AI review outputHash')
+    const decisions = normalizeAiReviewDecisions(input.decisions, this.config.secretPolicy)
+
+    return this.transaction(() => {
+      const requestRow = this.firstRow(
+        "SELECT details_json FROM memory_audit WHERE action = 'ai-review.request' AND entity_type = 'ai-review' AND entity_id = ? LIMIT 1",
+        requestId,
+      )
+      if (requestRow === undefined) throw new Error('dsh-memory AI review result has no request audit')
+      if (this.firstRow(
+        "SELECT seq FROM memory_audit WHERE action = 'ai-review.complete' AND entity_type = 'ai-review' AND entity_id = ? LIMIT 1",
+        requestId,
+      ) !== undefined) {
+        throw new Error('dsh-memory AI review request is already complete')
+      }
+      const requestDetails = parseJson(readString(requestRow, 'details_json'), 'AI review request details')
+      assertObjectInput(requestDetails, 'AI review request details')
+      const expectedCandidates = normalizeAiReviewCandidateReferences(
+        requestDetails['candidates'],
+        'AI review request candidates',
+      )
+      const recordedMinConfidence = normalizeProbability(
+        requestDetails['minConfidence'],
+        'AI review recorded minConfidence',
+      )
+      if (recordedMinConfidence !== minConfidence) {
+        throw new Error('dsh-memory AI review result changes the recorded confidence threshold')
+      }
+      const recordedWorkspace = normalizeScope({
+        type: 'workspace',
+        key: normalizeIdentifier(requestDetails['workspace'], 'AI review recorded workspace'),
+      }).key
+      const recordedSessionId = normalizeIdentifier(requestDetails['sessionId'], 'AI review recorded sessionId')
+      const recordedTurn = assertPositiveInteger(requestDetails['turn'], 'AI review recorded turn')
+      const recordedEndSeq = assertNonNegativeInteger(requestDetails['endSeq'], 'AI review recorded endSeq')
+      const recordedMode = requestDetails['mode']
+      const recordedSourceHash = normalizeSha256(requestDetails['sourceHash'], 'AI review recorded sourceHash')
+      if (recordedWorkspace !== workspace || recordedMode !== mode || recordedSourceHash !== evidenceContentHash
+        || evidenceLocator !== `session:${recordedSessionId};turn:${recordedTurn};through-seq:${recordedEndSeq}`) {
+        throw new Error('dsh-memory AI review result changes its recorded scope, mode, or evidence')
+      }
+      const recordedProvider = normalizeIdentifier(requestDetails['provider'], 'AI review recorded provider')
+      const recordedModel = normalizeIdentifier(requestDetails['model'], 'AI review recorded model')
+      const expectedReviewerId = `ai-reviewer:${createHash('sha256')
+        .update(`${recordedProvider}\u0000${recordedModel}`)
+        .digest('hex')
+        .slice(0, 24)}`
+      if (reviewerId !== expectedReviewerId) {
+        throw new Error('dsh-memory AI review reviewer identity does not match the recorded route')
+      }
+      assertSameAiReviewCandidates(expectedCandidates, decisions)
+
+      const reviewer: MemoryActor = { kind: 'policy', id: reviewerId }
+      const outcomes: Array<Record<string, unknown>> = []
+      const reviewed: MemoryCandidate[] = []
+      for (const decision of decisions) {
+        const candidate = this.requireCandidate(decision.candidateId)
+        assertAiReviewCandidateIdentity(candidate, decision)
+        const deterministicEligible = this.isAiPublicationEligible(
+          candidate,
+          workspace,
+          evidenceLocator,
+          evidenceContentHash,
+          now,
+        )
+        const checksPass = Object.values(decision.checks).every(Boolean)
+        const checksFail = Object.values(decision.checks).some(value => !value)
+        const effectiveAction = mode === 'shadow' || decision.confidence < minConfidence
+          ? 'defer'
+          : decision.verdict === 'publish' && checksPass && deterministicEligible
+            ? 'publish'
+            : decision.verdict === 'reject' && checksFail && !deterministicEligible
+              ? 'reject'
+              : 'defer'
+        const reasonHash = createHash('sha256').update(decision.reason).digest('hex')
+        const result = effectiveAction === 'defer'
+          ? candidate
+          : this.decideCandidate(candidate, effectiveAction, reviewer, `AI review: ${decision.reason}`, now, 'AI review')
+        reviewed.push(result)
+        outcomes.push({
+          candidateId: candidate.id,
+          verdict: decision.verdict,
+          effectiveAction,
+          confidence: decision.confidence,
+          checks: decision.checks,
+          deterministicEligible,
+          reasonHash,
+        })
+      }
+      this.audit(reviewer, 'ai-review.complete', 'ai-review', requestId, {
+        outputHash,
+        mode,
+        minConfidence,
+        decisions: outcomes,
+      }, now)
+      return Object.freeze(reviewed)
+    })
+  }
+
+  private isAiPublicationEligible(
+    candidate: MemoryCandidate,
+    workspace: string,
+    evidenceLocator: string,
+    evidenceContentHash: string,
+    now: number,
+  ): boolean {
+    if (candidate.status !== 'candidate'
+      || candidate.content.kind === 'working'
+      || candidate.content.scope.type !== 'workspace'
+      || candidate.content.scope.key !== workspace
+      || candidate.content.sensitivity !== 'internal'
+      || candidate.content.expiresAt !== undefined && candidate.content.expiresAt <= now
+      || candidate.content.confidence < this.config.minConfidence
+      || candidate.similarMemoryIds.length > 0
+      || candidate.content.evidence.length !== 1
+      || candidate.content.evidence[0]?.kind !== 'session-event'
+      || candidate.content.evidence[0].locator !== evidenceLocator
+      || candidate.content.evidence[0].contentHash !== evidenceContentHash) return false
+    if (candidate.targetMemoryId === undefined) return true
+    const target = this.firstRow(
+      'SELECT current_revision, status FROM memory_records WHERE id = ? LIMIT 1',
+      candidate.targetMemoryId,
+    )
+    if (target === undefined
+      || readNumber(target, 'current_revision') !== candidate.expectedRevision
+      || !['active', 'stale', 'archived'].includes(readString(target, 'status'))) return false
+    return this.firstRow(
+      `SELECT id FROM memory_conflicts
+       WHERE status = 'open' AND (left_memory_id = ? OR right_memory_id = ?) LIMIT 1`,
+      candidate.targetMemoryId,
+      candidate.targetMemoryId,
+    ) === undefined
   }
 
   recordRetrieval(input: MemoryRetrievalLogInput): void {
@@ -1306,8 +1644,8 @@ export class MemoryStore {
       }),
       feedbackByKind: Object.freeze(feedbackByKind),
       databaseContentionCount: writerContentionCounts.get(`${this.config.storagePath}.writer.lock`) ?? 0,
-      // Projection and retrieval work are synchronous and lifecycle-owned;
-      // there is intentionally no untracked background queue to fail.
+      // MemoryStore owns no asynchronous worker. MemoryService overlays its
+      // process-local consolidation failure count on this canonical snapshot.
       backgroundTaskFailures: 0,
     })
   }
@@ -3491,6 +3829,152 @@ function assertNonNegativeInteger(value: unknown, name: string): number {
     throw new Error(`dsh-memory ${name} must be a non-negative integer`)
   }
   return value
+}
+
+function normalizeIntegerArray(value: unknown, name: string, maximum: number): readonly number[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > maximum) {
+    throw new Error(`dsh-memory ${name} must contain 1 to ${maximum} integers`)
+  }
+  const result = value.map((item, index) => assertNonNegativeInteger(item, `${name}[${index}]`))
+  if (new Set(result).size !== result.length) throw new Error(`dsh-memory ${name} must not contain duplicates`)
+  return Object.freeze(result)
+}
+
+function normalizeRevisionReferences(
+  value: unknown,
+  name: string,
+  maximum: number,
+): readonly { readonly memoryId: string; readonly revision: number }[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new Error(`dsh-memory ${name} must contain at most ${maximum} references`)
+  }
+  const result = value.map((item, index) => {
+    assertObjectInput(item, `${name}[${index}]`)
+    return Object.freeze({
+      memoryId: normalizeIdentifier(item.memoryId, `${name}[${index}].memoryId`),
+      revision: assertPositiveInteger(item.revision, `${name}[${index}].revision`),
+    })
+  })
+  if (new Set(result.map(item => item.memoryId)).size !== result.length) {
+    throw new Error(`dsh-memory ${name} must not contain duplicate memory ids`)
+  }
+  return Object.freeze(result)
+}
+
+function normalizeIdentifierArray(value: unknown, name: string, maximum: number): readonly string[] {
+  if (!Array.isArray(value) || value.length > maximum) {
+    throw new Error(`dsh-memory ${name} must contain at most ${maximum} identifiers`)
+  }
+  const result = value.map((item, index) => normalizeIdentifier(item, `${name}[${index}]`))
+  if (new Set(result).size !== result.length) throw new Error(`dsh-memory ${name} must not contain duplicates`)
+  return Object.freeze(result)
+}
+
+function normalizeProbability(value: unknown, name: string): number {
+  const result = assertFinite(value, name)
+  if (result < 0 || result > 1) throw new Error(`dsh-memory ${name} must be in [0, 1]`)
+  return result
+}
+
+function normalizeAiReviewCandidateReferences(
+  value: unknown,
+  name: string,
+): readonly MemoryAiReviewCandidateReference[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10) {
+    throw new Error(`dsh-memory ${name} must contain 1 to 10 candidate references`)
+  }
+  const result = value.map((item, index) => {
+    assertObjectInput(item, `${name}[${index}]`)
+    return Object.freeze({
+      candidateId: normalizeIdentifier(item.candidateId, `${name}[${index}].candidateId`),
+      candidateHash: normalizeSha256(item.candidateHash, `${name}[${index}].candidateHash`),
+      candidateRequestId: normalizeIdentifier(item.candidateRequestId, `${name}[${index}].candidateRequestId`),
+      candidateActorId: normalizeIdentifier(item.candidateActorId, `${name}[${index}].candidateActorId`),
+    })
+  })
+  if (new Set(result.map(item => item.candidateId)).size !== result.length) {
+    throw new Error(`dsh-memory ${name} must not contain duplicate candidate ids`)
+  }
+  return Object.freeze(result)
+}
+
+function normalizeAiReviewChecks(value: unknown, name: string): MemoryAiReviewChecks {
+  assertObjectInput(value, name)
+  const keys = [
+    'grounded',
+    'durable',
+    'scopeCorrect',
+    'nonSensitive',
+    'useful',
+    'nonDuplicate',
+    'nonConflicting',
+  ] as const satisfies readonly (keyof MemoryAiReviewChecks)[]
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some(key => !keys.includes(key as keyof MemoryAiReviewChecks))) {
+    throw new Error(`dsh-memory ${name} has unknown or missing checks`)
+  }
+  const result = Object.fromEntries(keys.map(key => {
+    if (typeof value[key] !== 'boolean') throw new Error(`dsh-memory ${name}.${key} must be a boolean`)
+    return [key, value[key]]
+  })) as unknown as MemoryAiReviewChecks
+  return Object.freeze(result)
+}
+
+function normalizeAiReviewDecisions(
+  value: unknown,
+  secretPolicy: ResolvedConfig['secretPolicy'],
+): readonly MemoryAiReviewDecisionInput[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 10) {
+    throw new Error('dsh-memory AI review decisions must contain 1 to 10 decisions')
+  }
+  const result = value.map((item, index) => {
+    assertObjectInput(item, `AI review decisions[${index}]`)
+    const references = normalizeAiReviewCandidateReferences([item], `AI review decisions[${index}] reference`)[0]!
+    const verdict = item.verdict
+    if (verdict !== 'publish' && verdict !== 'reject' && verdict !== 'defer') {
+      throw new Error(`dsh-memory AI review decisions[${index}].verdict is invalid`)
+    }
+    return Object.freeze({
+      ...references,
+      verdict,
+      confidence: normalizeProbability(item.confidence, `AI review decisions[${index}].confidence`),
+      checks: normalizeAiReviewChecks(item.checks, `AI review decisions[${index}].checks`),
+      reason: normalizeGovernanceReason(item.reason, secretPolicy, 'AI review'),
+    })
+  })
+  if (new Set(result.map(item => item.candidateId)).size !== result.length) {
+    throw new Error('dsh-memory AI review decisions must not contain duplicate candidate ids')
+  }
+  return Object.freeze(result)
+}
+
+function assertSameAiReviewCandidates(
+  expected: readonly MemoryAiReviewCandidateReference[],
+  actual: readonly MemoryAiReviewCandidateReference[],
+): void {
+  if (expected.length !== actual.length) throw new Error('dsh-memory AI review result candidate set changed')
+  const actualById = new Map(actual.map(item => [item.candidateId, item]))
+  for (const reference of expected) {
+    const decision = actualById.get(reference.candidateId)
+    if (decision === undefined
+      || decision.candidateHash !== reference.candidateHash
+      || decision.candidateRequestId !== reference.candidateRequestId
+      || decision.candidateActorId !== reference.candidateActorId) {
+      throw new Error('dsh-memory AI review result candidate identity changed')
+    }
+  }
+}
+
+function assertAiReviewCandidateIdentity(
+  candidate: MemoryCandidate,
+  expected: MemoryAiReviewCandidateReference,
+): void {
+  if (candidate.status !== 'candidate'
+    || candidate.contentHash !== expected.candidateHash
+    || candidate.requestId !== expected.candidateRequestId
+    || candidate.actor.kind !== 'agent'
+    || candidate.actor.id !== expected.candidateActorId) {
+    throw new Error('dsh-memory AI review candidate changed or is not owned by this request')
+  }
 }
 
 function assertFinite(value: unknown, name: string): number {

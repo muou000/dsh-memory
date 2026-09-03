@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,11 +26,79 @@ class RecordingAdapter extends LlmAdapter {
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
+    const source = options.messages[0]?.source
+    const text = source?.kind === 'plugin' && source.plugin === 'dsh-memory/consolidator'
+      ? JSON.stringify({
+          proposals: [{
+            operation: 'create',
+            kind: 'semantic',
+            subject: 'Loader automatic memory candidate',
+            applicability: 'When running dsh-memory through the real Loader composition.',
+            action: 'Queue a review candidate after a completed turn.',
+            rationale: 'The durable turn boundary supplies a stable asynchronous trigger.',
+            confidence: 0.9,
+          }],
+        })
+      : source?.kind === 'plugin' && source.plugin === 'dsh-memory/reviewer'
+        ? JSON.stringify({
+            decisions: [{
+              verdict: 'publish',
+              reason: 'The source turn supports a durable and scoped workspace memory.',
+              confidence: 0.97,
+              checks: {
+                grounded: true,
+                durable: true,
+                scopeCorrect: true,
+                nonSensitive: true,
+                useful: true,
+                nonDuplicate: true,
+                nonConflicting: true,
+              },
+            }],
+          })
+        : 'used governed memory'
     yield { type: 'block-start', index: 0, blockType: 'text' }
-    yield { type: 'text-delta', index: 0, text: 'used governed memory' }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text: 'used governed memory' } }
+    yield { type: 'text-delta', index: 0, text }
+    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
     yield { type: 'usage', usage: { inputTokens: 20, outputTokens: 3 } }
     yield { type: 'finish', reason: { kind: 'stop' } }
+  }
+}
+
+class BlockingConsolidationAdapter extends LlmAdapter {
+  readonly consolidationStarted: Promise<void>
+  aborted = false
+  private resolveStarted: () => void = () => undefined
+
+  constructor() {
+    super()
+    this.consolidationStarted = new Promise<void>(resolve => {
+      this.resolveStarted = resolve
+    })
+  }
+
+  override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
+    const source = options.messages[0]?.source
+    if (source?.kind !== 'plugin' || source.plugin !== 'dsh-memory/consolidator') {
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'main response completed' }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      return
+    }
+    const signal = options.signal
+    if (signal === undefined) throw new Error('expected consolidation signal')
+    this.resolveStarted()
+    await new Promise<never>((_resolve, reject) => {
+      const abort = (): void => {
+        this.aborted = true
+        reject(signal.reason)
+      }
+      if (signal.aborted) {
+        abort()
+        return
+      }
+      signal.addEventListener('abort', abort, { once: true })
+    })
   }
 }
 
@@ -41,7 +109,11 @@ afterEach(async () => {
   root = undefined
 })
 
-async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
+async function loadComposition(
+  autoConsolidate = false,
+  withSessionPersistence = true,
+  aiReviewMode: 'off' | 'shadow' | 'enforce' = 'off',
+): Promise<{ ctx: Context; workspace: string }> {
   root = await mkdtemp(join(tmpdir(), 'dsh-memory-loader-'))
   const workspace = join(root, 'workspace')
   const configPath = join(root, 'cordis.yml')
@@ -63,6 +135,12 @@ async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
     `    dshHome: '${portableRoot}'`,
     '    injectionTokenBudget: 256',
     '    maxInjectedItems: 2',
+    `    autoConsolidate: ${String(autoConsolidate)}`,
+    ...(aiReviewMode === 'off' ? [] : [
+      `    aiReviewMode: ${aiReviewMode}`,
+      '    reviewProvider: review',
+      '    reviewModel: review-model',
+    ]),
     "- name: '@deepseek-ai/dsh-agent-loop'",
     '  config:',
     '    agents: []',
@@ -71,6 +149,8 @@ async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
 
   context = new Context()
   context.baseUrl = pathToFileURL(root).href + '/'
+  if (withSessionPersistence) context.provide('sessionPersistence', {} as never)
+  context.on('session/flush', () => undefined)
   await context.plugin(Loader)
   context.loader.builtins.include = Include
   const modules = new Map<string, unknown>([
@@ -95,6 +175,22 @@ async function loadComposition(): Promise<{ ctx: Context; workspace: string }> {
 }
 
 describe('real Loader and agent-loop composition', () => {
+  it('loads the default-off baseline without llm or sessions services', async () => {
+    root = await mkdtemp(join(tmpdir(), 'dsh-memory-minimal-'))
+    context = new Context()
+    await context.plugin(AgentRegistry)
+    await context.plugin(SystemPrompt)
+    await context.plugin(ToolRuntime)
+    await context.plugin(memory, {
+      storagePath: join(root, 'memory.sqlite'),
+      projectionPath: join(root, 'projection'),
+      markdownProjection: false,
+      autoConsolidate: false,
+    })
+
+    expect(context.memories.health.state).toBe('ready')
+  })
+
   it('injects scoped knowledge into the model request and persists the recall in the session log', { timeout: 60_000 }, async () => {
     const { ctx, workspace } = await loadComposition()
     const unloaded = [...ctx.loader.entries()]
@@ -176,6 +272,116 @@ describe('real Loader and agent-loop composition', () => {
     })
     expect(read.value).toMatchObject({ found: true, memoryId: record.memoryId })
     expect(ctx.memories.metrics()).toMatchObject({ retrievalCount: 2, selectedCount: 2, drillDownCount: 1 })
+  })
+
+  it('keeps automatic consolidation dormant when only a flush listener exists without persistence', { timeout: 60_000 }, async () => {
+    const { ctx, workspace } = await loadComposition(true, false)
+    const adapter = new RecordingAdapter()
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(
+      SessionId('memory-loader-no-persistence'),
+      { provider: 'mock', model: 'mock' },
+      { cwd: workspace },
+    )
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Do not consolidate without durable persistence.' }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+    await new Promise(resolve => setTimeout(resolve, 20))
+
+    expect(ctx.memories.health.state).toBe('ready')
+    expect(adapter.requests).toHaveLength(1)
+    expect(ctx.memories.listCandidates()).toEqual([])
+    expect(ctx.memories.listAudit().some(row => row.action === 'consolidation.request')).toBe(false)
+  })
+
+  it('creates an automatic review candidate through the real Loader and agent loop', { timeout: 60_000 }, async () => {
+    const { ctx, workspace } = await loadComposition(true)
+    const adapter = new RecordingAdapter()
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(
+      SessionId('memory-loader-automatic'),
+      { provider: 'mock', model: 'mock' },
+      { cwd: workspace },
+    )
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Capture durable project knowledge after this turn.' }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+    await vi.waitFor(() => {
+      expect(ctx.memories.listCandidates()).toHaveLength(1)
+    }, { timeout: 5_000 })
+
+    expect(adapter.requests).toHaveLength(2)
+    expect(adapter.requests[1]).toMatchObject({ provider: 'mock', model: 'mock' })
+    expect(adapter.requests[1]?.messages[0]?.source).toMatchObject({
+      kind: 'plugin',
+      plugin: 'dsh-memory/consolidator',
+    })
+    expect(ctx.memories.listRecords()).toEqual([])
+    expect(ctx.memories.listCandidates()[0]).toMatchObject({
+      status: 'candidate',
+      content: {
+        scope: { type: 'workspace', key: workspace },
+        subject: 'Loader automatic memory candidate',
+      },
+    })
+  })
+
+  it('publishes through the configured AI reviewer in enforce mode via the real Loader', { timeout: 60_000 }, async () => {
+    const { ctx, workspace } = await loadComposition(true, true, 'enforce')
+    const adapter = new RecordingAdapter()
+    ctx.llm.registerAdapter(['mock', 'review'], adapter)
+    const agent = ctx.agentLoop.create(
+      SessionId('memory-loader-ai-review'),
+      { provider: 'mock', model: 'mock' },
+      { cwd: workspace },
+    )
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Capture and review durable project knowledge after this turn.' }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+    await vi.waitFor(() => {
+      expect(ctx.memories.listCandidates('published')).toHaveLength(1)
+    }, { timeout: 5_000 })
+
+    expect(adapter.requests).toHaveLength(3)
+    expect(adapter.requests[2]).toMatchObject({ provider: 'review', model: 'review-model', tools: [] })
+    expect(ctx.memories.listRecords()).toHaveLength(1)
+    expect(ctx.memories.listAudit().some(row => row.action === 'ai-review.complete')).toBe(true)
+  })
+
+  it('hot-unload aborts and drains an active automatic request before closing the store', { timeout: 60_000 }, async () => {
+    const { ctx, workspace } = await loadComposition(true)
+    const adapter = new BlockingConsolidationAdapter()
+    ctx.llm.registerAdapter(['mock'], adapter)
+    const agent = ctx.agentLoop.create(
+      SessionId('memory-loader-unload-active'),
+      { provider: 'mock', model: 'mock' },
+      { cwd: workspace },
+    )
+    const previous = ctx.memories
+    const entry = [...ctx.loader.entries()].find(item => item.options.name === PACKAGE_NAME)
+    expect(entry !== undefined).toBe(true)
+
+    agent.followup(createUserMessage({
+      content: [{ type: 'text', text: 'Start an automatic consolidation request.' }],
+      source: { kind: 'user' },
+    }))
+    await agent.whenIdle()
+    await adapter.consolidationStarted
+    await ctx.loader.update(entry!.id, { disabled: true })
+    await ctx.loader.await()
+
+    expect(adapter.aborted).toBe(true)
+    expect(ctx.get('memories')).toBeUndefined()
+    expect(() => previous.stats()).toThrow('store is closed')
   })
 
   it('hot-disables every registration and writer resource, then reloads the same store', { timeout: 60_000 }, async () => {

@@ -1,0 +1,161 @@
+{
+  "format": "dsh-memory-review-policy-evaluation",
+  "version": 1,
+  "qualification": "deterministic-development",
+  "startedAt": "2026-09-03T04:52:59.155Z",
+  "finishedAt": "2026-09-03T04:53:00.160Z",
+  "node": "v26.8.1",
+  "sourceRevision": "bfd465a68ed760e35bb60eb9ca93bebd15c54a93",
+  "sourceDirty": true,
+  "policy": {
+    "modes": [
+      "off",
+      "shadow",
+      "enforce"
+    ],
+    "reviewMinConfidence": 0.9,
+    "nearDuplicateThreshold": 0.1,
+    "reviewerRoute": {
+      "provider": "review",
+      "model": "review-model"
+    },
+    "extractionRoute": {
+      "provider": "extract",
+      "model": "extract-model"
+    }
+  },
+  "policySha256": "32cd777c2a5999695afd69855be12c38f3acc195b984c9cbcec8f8811be3d99a",
+  "results": [
+    {
+      "id": "grounded-publish",
+      "expected": {
+        "off": "candidate",
+        "shadow": "candidate",
+        "enforce": "published"
+      },
+      "observed": {
+        "off": {
+          "status": "candidate",
+          "reviewAudits": 0
+        },
+        "shadow": {
+          "status": "candidate",
+          "reviewAudits": 2
+        },
+        "enforce": {
+          "status": "published",
+          "reviewAudits": 2
+        }
+      }
+    },
+    {
+      "id": "low-confidence-defer",
+      "expected": {
+        "off": "candidate",
+        "shadow": "candidate",
+        "enforce": "candidate"
+      },
+      "observed": {
+        "off": {
+          "status": "candidate",
+          "reviewAudits": 0
+        },
+        "shadow": {
+          "status": "candidate",
+          "reviewAudits": 2
+        },
+        "enforce": {
+          "status": "candidate",
+          "reviewAudits": 2
+        }
+      }
+    },
+    {
+      "id": "contradictory-reject-defer",
+      "expected": {
+        "off": "candidate",
+        "shadow": "candidate",
+        "enforce": "candidate"
+      },
+      "observed": {
+        "off": {
+          "status": "candidate",
+          "reviewAudits": 0
+        },
+        "shadow": {
+          "status": "candidate",
+          "reviewAudits": 2
+        },
+        "enforce": {
+          "status": "candidate",
+          "reviewAudits": 2
+        }
+      }
+    },
+    {
+      "id": "duplicate-reject",
+      "expected": {
+        "off": "candidate",
+        "shadow": "candidate",
+        "enforce": "rejected"
+      },
+      "observed": {
+        "off": {
+          "status": "candidate",
+          "reviewAudits": 0
+        },
+        "shadow": {
+          "status": "candidate",
+          "reviewAudits": 2
+        },
+        "enforce": {
+          "status": "rejected",
+          "reviewAudits": 2
+        }
+      }
+    },
+    {
+      "id": "stale-update-defer",
+      "expected": {
+        "off": "candidate",
+        "shadow": "candidate",
+        "enforce": "candidate"
+      },
+      "observed": {
+        "off": {
+          "status": "candidate",
+          "reviewAudits": 0
+        },
+        "shadow": {
+          "status": "candidate",
+          "reviewAudits": 2
+        },
+        "enforce": {
+          "status": "candidate",
+          "reviewAudits": 2
+        }
+      }
+    }
+  ],
+  "metrics": {
+    "cases": 5,
+    "pairedChecks": 15,
+    "pairedChecksPassed": 15,
+    "falsePublishes": 0,
+    "falseRejects": 0,
+    "enforcePublished": 1,
+    "enforceRejected": 1,
+    "enforceDeferred": 3
+  },
+  "thresholds": {
+    "pairedChecksPassed": 15,
+    "falsePublishes": 0,
+    "falseRejects": 0
+  },
+  "pass": true,
+  "limitations": [
+    "This keyless evaluation exercises deterministic store policy only.",
+    "It does not establish reviewer semantic quality, model independence, latency, cost, or production safety.",
+    "Production enforce mode still requires held-out paired model and shadow/canary evidence."
+  ]
+}

@@ -2,7 +2,7 @@
 
 `dsh-memory` 是 DeepSeek Harness（DSH）的受治理知识记忆插件。它以版本化 SQLite 数据为唯一事实来源，同时提供两种读取方式：模型获得经过作用域过滤且写入 session log 的小型检索结果，人可以浏览由数据库确定性生成的 Markdown 页面。
 
-原始对话不会自动成为长期知识。模型可以检索、读取、提议候选和反馈，但不能自行发布、扩大作用域、解决冲突或永久删除记录。
+默认不把原始对话变成长久知识。显式启用 `autoConsolidate` 后，插件会在正常完成的轮次结束后异步提取少量新建或更新候选；候选默认仍需人类审核才能发布。可额外配置 `aiReviewMode: shadow` 记录 AI 审核建议但不改变候选，或 `aiReviewMode: enforce` 在本地作用域、敏感度、重复、冲突、来源和 revision 门禁全部通过且置信度达标时自动发布/拒绝；任何不确定情况都保留待人工审核。模型-facing 工具和提炼模型可以检索、读取、提议候选和反馈，但不能直接发布、扩大作用域、解决冲突或永久删除记录；reviewer 也只能通过上述本地策略门禁改变本次自动请求的新候选。
 
 ## 当前状态
 
@@ -11,14 +11,15 @@
 ## 功能与边界
 
 - 保存带来源、作用域、敏感级别、状态、置信度和修订历史的结构化知识。
-- 将模型提议先写入候选队列，由受信任的人类操作员审核后发布。
+- 将模型提议先写入候选队列，由受信任的人类操作员审核后发布；可选 AI reviewer 仅在 `enforce` 且本地门禁全部通过时自动处理本次自动归纳候选。
 - 在排序前过滤 workspace、session、agent、user、状态、敏感级别和过期时间。
 - 在每轮首次模型请求前按配置自动检索，也提供 `memory_search`、`memory_read`、`memory_propose` 和 `memory_feedback` 工具。
-- 将实际送入模型的知识记录到 DSH session log，保留 memory id 和 revision 以便重放。
+- 可在正常完成的轮次后通过有界后台队列自动归纳；新建与更新先生成候选，AI 审核的 `shadow` 模式只记录建议，`enforce` 模式也只有通过本地治理门禁才会改变正式知识。
+- 将实际送入模型的知识通过标准 session 输入记录，并将自动归纳与 AI review 的 source seq、路由、revision、策略、阈值和输入/输出摘要写入 append-only `memory_audit`，以便审计和重放。
 - 生成只读 Markdown 投影，支持候选、冲突、生命周期、来源和修订浏览。
 - 提供管理 CLI，用于审核、备份、恢复、导入导出、投影重建、保留策略和物理清理。
 
-插件不会自动把所有会话汇总为记忆，不会让模型审批自己的候选，也不会把 Markdown 当作可编辑的事实来源。
+插件默认不扫描历史会话，也不会让模型审批自己的候选或把 Markdown 当作可编辑的事实来源。自动归纳仅处理启用后正常完成、同时包含直接用户文本与助手文本且带 workspace 的轮次。
 
 ## 环境要求
 
@@ -64,8 +65,24 @@ dsh --profile web --dump-config
   config:
     dshHome: C:\managed\dsh
     autoInject: true
+    autoConsolidate: true
+    aiReviewMode: shadow
+    reviewProvider: review-provider
+    reviewModel: review-model
     maxInjectedItems: 6
     injectionTokenBudget: 1200
+    consolidationMaxInputChars: 24000
+    consolidationMaxOutputTokens: 1200
+    consolidationTimeoutMs: 30000
+    consolidationMaxProposals: 3
+    consolidationRelevantMemoryLimit: 6
+    consolidationMaxConcurrency: 1
+    consolidationMaxPendingTurns: 32
+    consolidationMaxQueuedChars: 1000000
+    reviewMaxInputChars: 64000
+    reviewMaxOutputTokens: 512
+    reviewTimeoutMs: 30000
+    reviewMinConfidence: 0.9
     markdownProjection: true
     secretPolicy: reject
     logQueryText: false
@@ -79,6 +96,17 @@ dsh --profile web --dump-config
 | `projectionPath` | 数据库同级的 `knowledge/` | Markdown 投影目录；显式设置时必须是绝对路径 |
 | `readOnly` | `false` | 只读打开现有数据库，禁止提议和反馈等写入 |
 | `autoInject` | `true` | 在一轮首次模型请求前检索可见知识 |
+| `autoConsolidate` | `false` | 正常轮次结束后异步生成候选；因模型成本和数据发送边界而默认关闭 |
+| `aiReviewMode` | `off` | `off` 不调用 reviewer；`shadow` 只记录 AI 建议；`enforce` 仅在本地门禁通过时自动发布/拒绝；后两者要求 `autoConsolidate: true` |
+| `reviewProvider` / `reviewModel` | 未设置 | AI reviewer 路由，必须成对设置，并且启用 reviewer 时必须与归纳路由不同 |
+| `consolidationProvider` / `consolidationModel` | 未设置 | 固定辅助模型路由，必须成对设置；未设置时沿用该轮助手响应的路由 |
+| `consolidationMaxInputChars` / `consolidationMaxOutputTokens` | `24000` / `1200` | 单次自动归纳输入字符上限和输出 token 上限 |
+| `consolidationTimeoutMs` | `30000` | 单次辅助模型请求超时，单位毫秒 |
+| `consolidationMaxProposals` / `consolidationRelevantMemoryLimit` | `3` / `6` | 每轮最多候选数和可供更新的同 workspace 已发布记忆数 |
+| `consolidationMaxConcurrency` / `consolidationMaxPendingTurns` | `1` / `32` | 后台并发数和等待队列上限 |
+| `consolidationMaxQueuedChars` | `1000000` | pending 与 active 归纳任务的总输入字符预算 |
+| `reviewMaxInputChars` / `reviewMaxOutputTokens` | `64000` / `512` | 单次 AI review 的完整候选帧输入上限和输出 token 上限 |
+| `reviewTimeoutMs` / `reviewMinConfidence` | `30000` / `0.9` | review 请求超时和自动决策最低置信度 |
 | `maxInjectedItems` | `6` | 一次自动注入最多返回的记录数 |
 | `injectionTokenBudget` | `1200` | 自动注入的估算 token 上限 |
 | `drillDownTokenBudget` | `4096` | `memory_read` 返回详情的估算 token 上限 |
@@ -90,7 +118,7 @@ dsh --profile web --dump-config
 | `busyTimeoutMs` | `5000` | SQLite 锁等待时间，单位为毫秒 |
 | `integrityCheckOnStart` | `true` | 启动时执行 SQLite `quick_check` |
 
-所有未知配置键和越界值都会在插件加载时被拒绝。完整字段、保留时间和维护阈值见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md) 与 [`src/config.ts`](src/config.ts)。
+自动归纳只发送当前轮的直接用户文本与助手可见文本，不发送 reasoning、工具结果或插件注入消息。若设置专用模型，`consolidationProvider` 和 `consolidationModel` 必须同时设置；否则使用产生该轮助手消息的相同路由。所有未知配置键和越界值都会在插件加载时被拒绝。完整字段、保留时间和维护阈值见 [`docs/OPERATIONS.md`](docs/OPERATIONS.md)、[`docs/AUTOMATIC_MEMORY.md`](docs/AUTOMATIC_MEMORY.md) 与 [`src/config.ts`](src/config.ts)。
 
 ## 使用与验证
 
@@ -112,7 +140,7 @@ dsh-memory publish <candidate-id> --store C:\managed\memory.sqlite `
 dsh-memory maintenance --store C:\managed\memory.sqlite
 ```
 
-模型工具只能读取、提议和反馈。发布、拒绝、冲突处理、生命周期转换、保留清理和物理 purge 要求明确的人类 actor 与审计原因。
+模型工具和自动归纳器只能读取或提议。AI reviewer 只接收完整候选、同 workspace 的当前记录摘要和裁剪后的来源文本，明确设置 `tools: []`；本地会再次检查 scope、sensitivity、secret、duplicate、conflict、source hash 和 revision。`shadow` 只写审计，`enforce` 才能在全部门禁满足时自动处理本次归纳请求新建的候选；低置信、矛盾、异常、过期或状态变化全部 defer。`dsh-memory candidates` 同时列出工具提议与自动归纳候选；人工审核者应先按候选中的 `session-event` locator 回看来源轮次，再执行 `publish`、`reject` 或 `skip`。发布、拒绝、冲突处理、生命周期转换、保留清理和物理 purge 要求明确的 actor 与审计原因。
 
 ## 数据、备份与删除
 
@@ -172,6 +200,9 @@ corepack pnpm run eval:pack
 ## 已知限制
 
 - 当前生产验收未完成，不能把开发期评测外推为通用质量、成本或延迟收益。
+- 自动归纳仅完成 mock 模型和真实 Loader 的确定性测试；尚未完成真实模型抽取质量、误报率、成本、延迟及多轮更正传播评测。
+- 自动归纳队列是进程内有界队列，没有跨进程 durable outbox 或失败重试；调用前先 flush 标准 session 事件，并在 append-only `memory_audit` 中记录 prompt 版本、源 seq、路由、target revision 与输入 hash，成功后记录 candidate ids。进程在该审计写入前崩溃时不会自动补跑。
+- 审计记录可重建插件提交给 LLM runtime 的输入，但不声称捕获 runtime middleware 或 provider adapter 的内部变换。`session/flush` 没有上游取消参数；插件取消时会停止等待，持久化 provider 仍须自行管理其未完成操作。
 - 自动检索依赖结构化作用域、置信度和词法候选；记录缺少准确适用范围或来源时，人工审核仍是必要步骤。
 - Markdown 首次生成、恢复、导入和显式修复需要完整重建；大型知识库应预留维护窗口。
 - 存储加密、密钥轮换、文件权限和跨主机复制由部署环境负责。
@@ -180,6 +211,7 @@ corepack pnpm run eval:pack
 ## 文档
 
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)：数据模型、服务和信任边界。
+- [`docs/AUTOMATIC_MEMORY.md`](docs/AUTOMATIC_MEMORY.md)：Claude Code/Codex 调查快照、自动触发设计与审核边界。
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md)：审核、备份、恢复、保留和上线步骤。
 - [`docs/ACCEPTANCE.md`](docs/ACCEPTANCE.md)：生产验收门禁。
 - [`docs/ACCEPTANCE_LEDGER.md`](docs/ACCEPTANCE_LEDGER.md)：当前 checkout 的证据状态。
