@@ -136,8 +136,8 @@ async function loadComposition(
     '    injectionTokenBudget: 256',
     '    maxInjectedItems: 2',
     `    autoConsolidate: ${String(autoConsolidate)}`,
+    `    aiReviewMode: ${aiReviewMode}`,
     ...(aiReviewMode === 'off' ? [] : [
-      `    aiReviewMode: ${aiReviewMode}`,
       '    reviewProvider: review',
       '    reviewModel: review-model',
     ]),

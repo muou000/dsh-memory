@@ -318,20 +318,20 @@ export function resolveConfig(config: Config = {}, env: NodeJS.ProcessEnv = proc
     && (config.reviewProvider!.trim().length === 0 || config.reviewModel!.trim().length === 0)) {
     throw new Error('dsh-memory review provider and model must be non-empty strings')
   }
-  if (config.aiReviewMode !== undefined && config.aiReviewMode !== 'off'
-    && config.autoConsolidate !== true) {
+  if (config.autoConsolidate === true && config.readOnly === true) {
+    throw new Error('dsh-memory config.autoConsolidate cannot be enabled with readOnly')
+  }
+  const aiReviewMode = config.aiReviewMode ?? 'enforce'
+  if (config.aiReviewMode === 'shadow' && config.autoConsolidate !== true) {
     throw new Error('dsh-memory config.aiReviewMode requires autoConsolidate')
   }
-  if (config.aiReviewMode !== undefined && config.aiReviewMode !== 'off' && !hasReviewProvider) {
+  if (config.autoConsolidate === true && aiReviewMode !== 'off' && !hasReviewProvider) {
     throw new Error('dsh-memory config.aiReviewMode requires reviewProvider and reviewModel')
   }
-  if (config.aiReviewMode !== undefined && config.aiReviewMode !== 'off' && hasConsolidationProvider
+  if (config.autoConsolidate === true && aiReviewMode !== 'off' && hasConsolidationProvider
     && config.reviewProvider!.trim() === config.consolidationProvider!.trim()
     && config.reviewModel!.trim() === config.consolidationModel!.trim()) {
     throw new Error('dsh-memory AI review route must be distinct from the consolidation route')
-  }
-  if (config.autoConsolidate === true && config.readOnly === true) {
-    throw new Error('dsh-memory config.autoConsolidate cannot be enabled with readOnly')
   }
 
   const home = config.dshHome ?? env['DSH_HOME'] ?? join(homedir(), '.dsh')
@@ -381,7 +381,7 @@ export function resolveConfig(config: Config = {}, env: NodeJS.ProcessEnv = proc
     consolidationMaxConcurrency: config.consolidationMaxConcurrency ?? 1,
     consolidationMaxPendingTurns: config.consolidationMaxPendingTurns ?? 32,
     consolidationMaxQueuedChars: config.consolidationMaxQueuedChars ?? 1_000_000,
-    aiReviewMode: config.aiReviewMode ?? 'enforce',
+    aiReviewMode,
     ...(config.reviewProvider === undefined ? {} : {
       reviewProvider: config.reviewProvider.trim(),
       reviewModel: config.reviewModel!.trim(),

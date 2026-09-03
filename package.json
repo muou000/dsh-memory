@@ -1,6 +1,6 @@
 {
   "name": "@muou000/dsh-memory",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Governed, replayable team knowledge memory for DeepSeek Harness",
   "repository": {
     "type": "git",
