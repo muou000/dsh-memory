@@ -126,6 +126,7 @@ async function setup(
 }> {
   home = temporaryMemoryHome({
     autoConsolidate: true,
+    aiReviewMode: 'off',
     consolidationMaxInputChars: 8_000,
     consolidationMaxOutputTokens: 512,
     consolidationTimeoutMs: 5_000,
@@ -730,6 +731,7 @@ describe('automatic turn-end memory consolidation', () => {
   it('cancels active work when its source session is disposed', async () => {
     home = temporaryMemoryHome({
       autoConsolidate: true,
+      aiReviewMode: 'off',
       consolidationTimeoutMs: 60_000,
       markdownProjection: false,
     })
@@ -820,6 +822,7 @@ describe('automatic turn-end memory consolidation', () => {
   it('aborts and awaits an active request during disposal', async () => {
     home = temporaryMemoryHome({
       autoConsolidate: true,
+      aiReviewMode: 'off',
       consolidationTimeoutMs: 60_000,
       markdownProjection: false,
     })
